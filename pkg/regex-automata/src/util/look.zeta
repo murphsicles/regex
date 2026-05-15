@@ -1,0 +1,1164 @@
+// Auto-converted from /tmp/df-regex-automata-0.4.14/regex-automata-0.4.14/src/util/look.rs
+
+use crate::util::{ escape::DebugByte, utf8 };
+/// A look-around assertion.
+/// 
+/// An assertion matches at a position between characters in a haystack.
+/// Namely, it does not actually "consume" any input as most parts of a regular
+/// expression do. Assertions are a way of stating that some property must be
+/// true at a particular point during matching.
+/// 
+/// For example, `(?m)^[a-z]+$` is a pattern that:
+/// 
+/// *Scans the haystack for a position at which `(?m:^)` is satisfied. That
+/// occurs at either the beginning of the haystack, or immediately following
+/// a `\n` character.
+/// *Looks for one or more occurrences of `[a-z]`.
+/// *Once `[a-z]+` has matched as much as it can, an overall match is only
+/// reported when `[a-z]+` stops just before a `\n`.
+/// 
+/// So in this case, `abc` and `\nabc\n` match, but `\nabc1\n` does not.
+/// 
+/// Assertions are also called "look-around," "look-behind" and "look-ahead."
+/// Specifically, some assertions are look-behind(like `^`), other assertions
+/// are look-ahead(like `$`) and yet other assertions are both look-ahead and
+/// look-behind(like `\b`).
+/// 
+/// # Assertions in an NFA
+/// 
+/// An assertion in a [`thompson::NFA`](crate::nfa::thompson::NFA) can be
+/// thought of as a conditional epsilon transition. That is, a matching engine
+/// like the [`PikeVM`](crate::nfa::thompson::pikevm::PikeVM) only permits
+/// moving through conditional epsilon transitions when their condition
+/// is satisfied at whatever position the `PikeVM` is currently at in the
+/// haystack.
+/// 
+/// How assertions are handled in a `DFA` is trickier, since a DFA does not
+/// have epsilon transitions at all. In this case, they are compiled into the
+/// automaton itself, at the expense of more states than what would be required
+/// without an assertion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Look {
+ Start,
+ End,
+ StartLF,
+ EndLF,
+ StartCRLF,
+ EndCRLF,
+ WordAscii,
+ WordAsciiNegate,
+ WordUnicode,
+ WordUnicodeNegate,
+ WordStartAscii,
+ WordEndAscii,
+ WordStartUnicode,
+ WordEndUnicode,
+ WordStartHalfAscii,
+ WordEndHalfAscii,
+ WordStartHalfUnicode,
+ WordEndHalfUnicode,
+}
+
+impl Look {
+ pub fn reversed(self) -> Look {
+ match self { Look::Start => Look::End, Look::End => Look::Start, Look::StartLF => Look::EndLF, Look::EndLF => Look::StartLF, Look::StartCRLF => Look::EndCRLF, Look::EndCRLF => Look::StartCRLF, Look::WordAscii => Look::WordAscii, Look::WordAsciiNegate => Look::WordAsciiNegate, Look::WordUnicode => Look::WordUnicode, Look::WordUnicodeNegate => Look::WordUnicodeNegate, Look::WordStartAscii => Look::WordEndAscii, Look::WordEndAscii => Look::WordStartAscii, Look::WordStartUnicode => Look::WordEndUnicode, Look::WordEndUnicode => Look::WordStartUnicode, Look::WordStartHalfAscii => Look::WordEndHalfAscii, Look::WordEndHalfAscii => Look::WordStartHalfAscii, Look::WordStartHalfUnicode => Look::WordEndHalfUnicode, Look::WordEndHalfUnicode => Look::WordStartHalfUnicode }
+ }
+ 
+ pub fn as_repr(self) -> u32 {
+ self as u32
+ }
+ 
+ pub fn from_repr(repr: u32) -> Option<Look> {
+ match repr { 0b00_0000_0000_0000_0001 => Some(Look::Start), 0b00_0000_0000_0000_0010 => Some(Look::End), 0b00_0000_0000_0000_0100 => Some(Look::StartLF), 0b00_0000_0000_0000_1000 => Some(Look::EndLF), 0b00_0000_0000_0001_0000 => Some(Look::StartCRLF), 0b00_0000_0000_0010_0000 => Some(Look::EndCRLF), 0b00_0000_0000_0100_0000 => Some(Look::WordAscii), 0b00_0000_0000_1000_0000 => Some(Look::WordAsciiNegate), 0b00_0000_0001_0000_0000 => Some(Look::WordUnicode), 0b00_0000_0010_0000_0000 => Some(Look::WordUnicodeNegate), 0b00_0000_0100_0000_0000 => Some(Look::WordStartAscii), 0b00_0000_1000_0000_0000 => Some(Look::WordEndAscii), 0b00_0001_0000_0000_0000 => Some(Look::WordStartUnicode), 0b00_0010_0000_0000_0000 => Some(Look::WordEndUnicode), 0b00_0100_0000_0000_0000 => Some(Look::WordStartHalfAscii), 0b00_1000_0000_0000_0000 => Some(Look::WordEndHalfAscii), 0b01_0000_0000_0000_0000 => Some(Look::WordStartHalfUnicode), 0b10_0000_0000_0000_0000 => Some(Look::WordEndHalfUnicode), _ => None }
+ }
+ 
+ pub fn as_char(self) -> char {
+ match self { Look::Start => 'A', Look::End => 'z', Look::StartLF => '^', Look::EndLF => '$', Look::StartCRLF => 'r', Look::EndCRLF => 'R', Look::WordAscii => 'b', Look::WordAsciiNegate => 'B', Look::WordUnicode => '𝛃', Look::WordUnicodeNegate => '𝚩', Look::WordStartAscii => '<', Look::WordEndAscii => '>', Look::WordStartUnicode => '〈', Look::WordEndUnicode => '〉', Look::WordStartHalfAscii => '◁', Look::WordEndHalfAscii => '▷', Look::WordStartHalfUnicode => '◀', Look::WordEndHalfUnicode => '▶' }
+ }
+ 
+}
+
+/// LookSet is a memory-efficient set of look-around assertions.
+/// 
+/// This is useful for efficiently tracking look-around assertions. For
+/// example, a [`thompson::NFA`](crate::nfa::thompson::NFA) provides properties
+/// that return `LookSet`s.
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+pub struct LookSet {
+ pub bits: u32,
+}
+
+impl LookSet {
+ pub fn empty() -> LookSet {
+ LookSet { bits: 0 }
+ }
+ 
+ pub fn full() -> LookSet {
+ LookSet { bits: ! 0 }
+ }
+ 
+ pub fn singleton(look: Look) -> LookSet {
+ LookSet::empty().insert(look)
+ }
+ 
+ pub fn len(self) -> usize {
+ usize::try_from(self.bits.count_ones()).unwrap()
+ }
+ 
+ pub fn is_empty(self) -> bool {
+ self.len() == 0
+ }
+ 
+ pub fn contains(self, look: Look) -> bool {
+ self.bits &look.as_repr() != 0
+ }
+ 
+ pub fn contains_anchor(&self) -> bool {
+ self.contains_anchor_haystack() || self.contains_anchor_line()
+ }
+ 
+ pub fn contains_anchor_haystack(&self) -> bool {
+ self.contains(Look::Start) || self.contains(Look::End)
+ }
+ 
+ pub fn contains_anchor_line(&self) -> bool {
+ self.contains(Look::StartLF) || self.contains(Look::EndLF) || self.contains(Look::StartCRLF) || self.contains(Look::EndCRLF)
+ }
+ 
+ pub fn contains_anchor_lf(&self) -> bool {
+ self.contains(Look::StartLF) || self.contains(Look::EndLF)
+ }
+ 
+ pub fn contains_anchor_crlf(&self) -> bool {
+ self.contains(Look::StartCRLF) || self.contains(Look::EndCRLF)
+ }
+ 
+ pub fn contains_word(self) -> bool {
+ self.contains_word_unicode() || self.contains_word_ascii()
+ }
+ 
+ pub fn contains_word_unicode(self) -> bool {
+ self.contains(Look::WordUnicode) || self.contains(Look::WordUnicodeNegate) || self.contains(Look::WordStartUnicode) || self.contains(Look::WordEndUnicode) || self.contains(Look::WordStartHalfUnicode) || self.contains(Look::WordEndHalfUnicode)
+ }
+ 
+ pub fn contains_word_ascii(self) -> bool {
+ self.contains(Look::WordAscii) || self.contains(Look::WordAsciiNegate) || self.contains(Look::WordStartAscii) || self.contains(Look::WordEndAscii) || self.contains(Look::WordStartHalfAscii) || self.contains(Look::WordEndHalfAscii)
+ }
+ 
+ pub fn iter(self) -> LookSetIter {
+ LookSetIter { set: self }
+ }
+ 
+ pub fn insert(self, look: Look) -> LookSet {
+ LookSet { bits: self.bits | look.as_repr() }
+ }
+ 
+ pub fn set_insert(&mut self, look: Look) {
+ *self = self.insert(look);
+ }
+ 
+ pub fn remove(self, look: Look) -> LookSet {
+ LookSet { bits: self.bits & ! look.as_repr() }
+ }
+ 
+ pub fn set_remove(&mut self, look: Look) {
+ *self = self.remove(look);
+ }
+ 
+ pub fn subtract(self, other: LookSet) -> LookSet {
+ LookSet { bits: self.bits & ! other.bits }
+ }
+ 
+ pub fn set_subtract(&mut self, other: LookSet) {
+ *self = self.subtract(other);
+ }
+ 
+ pub fn union(self, other: LookSet) -> LookSet {
+ LookSet { bits: self.bits | other.bits }
+ }
+ 
+ pub fn set_union(&mut self, other: LookSet) {
+ *self = self.union(other);
+ }
+ 
+ pub fn intersect(self, other: LookSet) -> LookSet {
+ LookSet { bits: self.bits &other.bits }
+ }
+ 
+ pub fn set_intersect(&mut self, other: LookSet) {
+ *self = self.intersect(other);
+ }
+ 
+ pub fn read_repr(slice: &[u8]) -> LookSet {
+ let bits = u32::from_ne_bytes(slice [.. 4] . try_into().unwrap());
+ LookSet { bits }
+ }
+ 
+ pub fn write_repr(self, slice: &mut [u8]) {
+ let raw = self.bits.to_ne_bytes();
+ slice [0] = raw [0];
+ slice [1] = raw [1];
+ slice [2] = raw [2];
+ slice [3] = raw [3];
+ }
+ 
+ pub fn available(self) -> Result<(), UnicodeWordBoundaryError> {
+ if self.contains_word_unicode() { UnicodeWordBoundaryError::check() ?; }
+ Ok(())
+ }
+ 
+}
+
+impl core::fmt::Debug for LookSet {
+ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+ if self.is_empty() { return write!(f, "∅"); }
+ for look in self.iter() { write!(f, "{}", look.as_char()) ?; }
+ Ok(())
+ }
+ 
+}
+
+/// An iterator over all look-around assertions in a [`LookSet`].
+/// 
+/// This iterator is created by [`LookSet::iter`].
+#[derive(Clone, Debug)]
+pub struct LookSetIter {
+ set: LookSet,
+}
+
+impl Iterator for LookSetIter {
+ type Item = Look;
+ fn next(&mut self) -> Option<Look> {
+ if self.set.is_empty() { return None; }
+ let bit = u16::try_from(self.set.bits.trailing_zeros()).unwrap();
+ let look = Look::from_repr(1 << bit) ?;
+ self.set = self.set.remove(look);
+ Some(look)
+ }
+ 
+}
+
+/// A matcher for look-around assertions.
+/// 
+/// This matcher permits configuring aspects of how look-around assertions are
+/// matched.
+/// 
+/// # Example
+/// 
+/// A `LookMatcher` can change the line terminator used for matching multi-line
+/// anchors such as `(?m:^)` and `(?m:$)`.
+/// 
+/// ```
+/// use regex_automata::{
+/// nfa::thompson::{self, pikevm::PikeVM},
+/// util::look::LookMatcher,
+/// Match, Input,
+/// };
+/// 
+/// let mut lookm = LookMatcher::new();
+/// lookm.set_line_terminator(b'\x00');
+/// 
+/// let re = PikeVM::builder()
+/// .thompson(thompson::Config::new().look_matcher(lookm))
+/// .build(r"(?m)^[a-z]+$")?;
+/// let mut cache = re.create_cache();
+/// 
+/// // Multi-line assertions now use NUL as a terminator.
+/// assert_eq!(
+/// Some(Match::must(0, 1..4)),
+/// re.find(&mut cache, b"\x00abc\x00"),
+/// );
+/// // ... and \n is no longer recognized as a terminator.
+/// assert_eq!(
+/// None,
+/// re.find(&mut cache, b"\nabc\n"),
+/// );
+/// 
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Debug)]
+pub struct LookMatcher {
+ lineterm: DebugByte,
+}
+
+impl LookMatcher {
+ pub fn new() -> LookMatcher {
+ LookMatcher { lineterm: DebugByte(b'\n') }
+ }
+ 
+ pub fn set_line_terminator(&mut self, byte: u8) -> &mut LookMatcher {
+ self.lineterm.0 = byte;
+ self
+ }
+ 
+ pub fn get_line_terminator(&self) -> u8 {
+ self.lineterm.0
+ }
+ 
+ pub fn matches(&self, look: Look, haystack: &[u8], at: usize) -> bool {
+ self.matches_inline(look, haystack, at)
+ }
+ 
+ fn matches_inline(&self, look: Look, haystack: &[u8], at: usize) -> bool {
+ match look { Look::Start => self.is_start(haystack, at), Look::End => self.is_end(haystack, at), Look::StartLF => self.is_start_lf(haystack, at), Look::EndLF => self.is_end_lf(haystack, at), Look::StartCRLF => self.is_start_crlf(haystack, at), Look::EndCRLF => self.is_end_crlf(haystack, at), Look::WordAscii => self.is_word_ascii(haystack, at), Look::WordAsciiNegate => self.is_word_ascii_negate(haystack, at), Look::WordUnicode => self.is_word_unicode(haystack, at).unwrap(), Look::WordUnicodeNegate => { self.is_word_unicode_negate(haystack, at).unwrap() } Look::WordStartAscii => self.is_word_start_ascii(haystack, at), Look::WordEndAscii => self.is_word_end_ascii(haystack, at), Look::WordStartUnicode => { self.is_word_start_unicode(haystack, at).unwrap() } Look::WordEndUnicode => { self.is_word_end_unicode(haystack, at).unwrap() } Look::WordStartHalfAscii => { self.is_word_start_half_ascii(haystack, at) } Look::WordEndHalfAscii => { self.is_word_end_half_ascii(haystack, at) } Look::WordStartHalfUnicode => { self.is_word_start_half_unicode(haystack, at).unwrap() } Look::WordEndHalfUnicode => { self.is_word_end_half_unicode(haystack, at).unwrap() } }
+ }
+ 
+ pub fn matches_set(&self, set: LookSet, haystack: &[u8], at: usize) -> bool {
+ self.matches_set_inline(set, haystack, at)
+ }
+ 
+ fn matches_set_inline(&self, set: LookSet, haystack: &[u8], at: usize) -> bool {
+ if set.contains(Look::Start) { if ! self.is_start(haystack, at) { return false; } }
+ if set.contains(Look::End) { if ! self.is_end(haystack, at) { return false; } }
+ if set.contains(Look::StartLF) { if ! self.is_start_lf(haystack, at) { return false; } }
+ if set.contains(Look::EndLF) { if ! self.is_end_lf(haystack, at) { return false; } }
+ if set.contains(Look::StartCRLF) { if ! self.is_start_crlf(haystack, at) { return false; } }
+ if set.contains(Look::EndCRLF) { if ! self.is_end_crlf(haystack, at) { return false; } }
+ if set.contains(Look::WordAscii) { if ! self.is_word_ascii(haystack, at) { return false; } }
+ if set.contains(Look::WordAsciiNegate) { if ! self.is_word_ascii_negate(haystack, at) { return false; } }
+ if set.contains(Look::WordUnicode) { if ! self.is_word_unicode(haystack, at).unwrap() { return false; } }
+ if set.contains(Look::WordUnicodeNegate) { if ! self.is_word_unicode_negate(haystack, at).unwrap() { return false; } }
+ if set.contains(Look::WordStartAscii) { if ! self.is_word_start_ascii(haystack, at) { return false; } }
+ if set.contains(Look::WordEndAscii) { if ! self.is_word_end_ascii(haystack, at) { return false; } }
+ if set.contains(Look::WordStartUnicode) { if ! self.is_word_start_unicode(haystack, at).unwrap() { return false; } }
+ if set.contains(Look::WordEndUnicode) { if ! self.is_word_end_unicode(haystack, at).unwrap() { return false; } }
+ if set.contains(Look::WordStartHalfAscii) { if ! self.is_word_start_half_ascii(haystack, at) { return false; } }
+ if set.contains(Look::WordEndHalfAscii) { if ! self.is_word_end_half_ascii(haystack, at) { return false; } }
+ if set.contains(Look::WordStartHalfUnicode) { if ! self.is_word_start_half_unicode(haystack, at).unwrap() { return false; } }
+ if set.contains(Look::WordEndHalfUnicode) { if ! self.is_word_end_half_unicode(haystack, at).unwrap() { return false; } }
+ true
+ }
+ 
+ fn add_to_byteset(&self, look: Look, set: &mut crate::util::alphabet::ByteClassSet) {
+ match look { Look::Start | Look::End => { } Look::StartLF | Look::EndLF => { set.set_range(self.lineterm.0, self.lineterm.0); } Look::StartCRLF | Look::EndCRLF => { set.set_range(b'\r', b'\r'); set.set_range(b'\n', b'\n'); } Look::WordAscii | Look::WordAsciiNegate | Look::WordUnicode | Look::WordUnicodeNegate | Look::WordStartAscii | Look::WordEndAscii | Look::WordStartUnicode | Look::WordEndUnicode | Look::WordStartHalfAscii | Look::WordEndHalfAscii | Look::WordStartHalfUnicode | Look::WordEndHalfUnicode => { let iswb = utf8::is_word_byte; let asu8 = | b: u16 | u8::try_from(b).unwrap(); let mut b1: u16 = 0; let mut b2: u16; while b1 <= 255 { b2 = b1 + 1; while b2 <= 255 &&iswb(asu8(b1)) == iswb(asu8(b2)) { b2 += 1; } assert!(b2 <= 256); set.set_range(asu8(b1), asu8(b2.checked_sub(1).unwrap())); b1 = b2; } } }
+ }
+ 
+ pub fn is_start(&self, _haystack: &[u8], at: usize) -> bool {
+ at == 0
+ }
+ 
+ pub fn is_end(&self, haystack: &[u8], at: usize) -> bool {
+ at == haystack.len()
+ }
+ 
+ pub fn is_start_lf(&self, haystack: &[u8], at: usize) -> bool {
+ self.is_start(haystack, at) || haystack [at - 1] == self.lineterm.0
+ }
+ 
+ pub fn is_end_lf(&self, haystack: &[u8], at: usize) -> bool {
+ self.is_end(haystack, at) || haystack [at] == self.lineterm.0
+ }
+ 
+ pub fn is_start_crlf(&self, haystack: &[u8], at: usize) -> bool {
+ self.is_start(haystack, at) || haystack [at - 1] == b'\n' || (haystack [at - 1] == b'\r' && (at >= haystack.len() || haystack [at] != b'\n'))
+ }
+ 
+ pub fn is_end_crlf(&self, haystack: &[u8], at: usize) -> bool {
+ self.is_end(haystack, at) || haystack [at] == b'\r' || (haystack [at] == b'\n' && (at == 0 || haystack [at - 1] != b'\r'))
+ }
+ 
+ pub fn is_word_ascii(&self, haystack: &[u8], at: usize) -> bool {
+ let word_before = at > 0 &&utf8::is_word_byte(haystack [at - 1]);
+ let word_after = at<haystack.len() &&utf8::is_word_byte(haystack [at]);
+ word_before != word_after
+ }
+ 
+ pub fn is_word_ascii_negate(&self, haystack: &[u8], at: usize) -> bool {
+ ! self.is_word_ascii(haystack, at)
+ }
+ 
+ pub fn is_word_unicode(&self, haystack: &[u8], at: usize) -> Result<bool, UnicodeWordBoundaryError> {
+ let word_before = is_word_char::rev(haystack, at) ?;
+ let word_after = is_word_char::fwd(haystack, at) ?;
+ Ok(word_before != word_after)
+ }
+ 
+ pub fn is_word_unicode_negate(&self, haystack: &[u8], at: usize) -> Result<bool, UnicodeWordBoundaryError> {
+ let word_before = at > 0 &&match utf8::decode_last(&haystack [.. at]) { None | Some(Err(_)) => return Ok(false), Some(Ok(_)) => is_word_char::rev(haystack, at) ? };
+ let word_after = at<haystack.len() &&match utf8::decode(&haystack [at ..]) { None | Some(Err(_)) => return Ok(false), Some(Ok(_)) => is_word_char::fwd(haystack, at) ? };
+ Ok(word_before == word_after)
+ }
+ 
+ pub fn is_word_start_ascii(&self, haystack: &[u8], at: usize) -> bool {
+ let word_before = at > 0 &&utf8::is_word_byte(haystack [at - 1]);
+ let word_after = at<haystack.len() &&utf8::is_word_byte(haystack [at]);
+ ! word_before &&word_after
+ }
+ 
+ pub fn is_word_end_ascii(&self, haystack: &[u8], at: usize) -> bool {
+ let word_before = at > 0 &&utf8::is_word_byte(haystack [at - 1]);
+ let word_after = at<haystack.len() &&utf8::is_word_byte(haystack [at]);
+ word_before &&! word_after
+ }
+ 
+ pub fn is_word_start_unicode(&self, haystack: &[u8], at: usize) -> Result<bool, UnicodeWordBoundaryError> {
+ let word_before = is_word_char::rev(haystack, at) ?;
+ let word_after = is_word_char::fwd(haystack, at) ?;
+ Ok(! word_before &&word_after)
+ }
+ 
+ pub fn is_word_end_unicode(&self, haystack: &[u8], at: usize) -> Result<bool, UnicodeWordBoundaryError> {
+ let word_before = is_word_char::rev(haystack, at) ?;
+ let word_after = is_word_char::fwd(haystack, at) ?;
+ Ok(word_before && ! word_after)
+ }
+ 
+ pub fn is_word_start_half_ascii(&self, haystack: &[u8], at: usize) -> bool {
+ let word_before = at > 0 &&utf8::is_word_byte(haystack [at - 1]);
+ ! word_before
+ }
+ 
+ pub fn is_word_end_half_ascii(&self, haystack: &[u8], at: usize) -> bool {
+ let word_after = at<haystack.len() &&utf8::is_word_byte(haystack [at]);
+ ! word_after
+ }
+ 
+ pub fn is_word_start_half_unicode(&self, haystack: &[u8], at: usize) -> Result<bool, UnicodeWordBoundaryError> {
+ let word_before = at > 0 &&match utf8::decode_last(&haystack [.. at]) { None | Some(Err(_)) => return Ok(false), Some(Ok(_)) => is_word_char::rev(haystack, at) ? };
+ Ok(! word_before)
+ }
+ 
+ pub fn is_word_end_half_unicode(&self, haystack: &[u8], at: usize) -> Result<bool, UnicodeWordBoundaryError> {
+ let word_after = at<haystack.len() &&match utf8::decode(&haystack [at ..]) { None | Some(Err(_)) => return Ok(false), Some(Ok(_)) => is_word_char::fwd(haystack, at) ? };
+ Ok(! word_after)
+ }
+ 
+}
+
+impl Default for LookMatcher {
+ fn default() -> LookMatcher {
+ LookMatcher::new()
+ }
+ 
+}
+
+/// An error that occurs when the Unicode-aware `\w` class is unavailable.
+/// 
+/// This error can occur when the data tables necessary for the Unicode aware
+/// Perl character class `\w` are unavailable. The `\w` class is used to
+/// determine whether a codepoint is considered a word character or not when
+/// determining whether a Unicode aware `\b` (or `\B`) matches at a particular
+/// position.
+/// 
+/// This error can only occur when the `unicode-word-boundary` feature is
+/// disabled.
+#[derive(Clone, Debug)]
+pub struct UnicodeWordBoundaryError {
+ (()),
+}
+
+impl UnicodeWordBoundaryError {
+ fn new() -> UnicodeWordBoundaryError {
+ UnicodeWordBoundaryError(())
+ }
+ 
+ pub fn check() -> Result<(), UnicodeWordBoundaryError> {
+ is_word_char::check()
+ }
+ 
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for UnicodeWordBoundaryError {
+}
+
+impl core::fmt::Display for UnicodeWordBoundaryError {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ write!(f, "Unicode-aware \\b and \\B are unavailable because the \
+ requisite data tables are missing, please enable the \
+ unicode-word-boundary feature")
+ }
+ 
+}
+
+/// A module that looks for word codepoints using regex-syntax's data tables.
+#[cfg(all(feature = "unicode-word-boundary", feature = "syntax", feature = "unicode-perl" ))]
+mod is_word_char {
+ use regex_syntax::try_is_word_character;
+ use crate::util::utf8;
+ fn check() -> Result<(), super::UnicodeWordBoundaryError> {
+ Ok(())
+ }
+ 
+ #[cfg_attr(feature = "perf-inline", inline(always))]
+ fn fwd(haystack: &[u8], at: usize) -> Result<bool, super::UnicodeWordBoundaryError> {
+ Ok(match utf8::decode(&haystack [at ..]) { None | Some(Err(_)) => false, Some(Ok(ch)) => try_is_word_character(ch).expect("since unicode-word-boundary, syntax and unicode-perl \
+ are all enabled, it is expected that \
+ try_is_word_character succeeds" ) })
+ }
+ 
+ #[cfg_attr(feature = "perf-inline", inline(always))]
+ fn rev(haystack: &[u8], at: usize) -> Result<bool, super::UnicodeWordBoundaryError> {
+ Ok(match utf8::decode_last(&haystack [.. at]) { None | Some(Err(_)) => false, Some(Ok(ch)) => try_is_word_character(ch).expect("since unicode-word-boundary, syntax and unicode-perl \
+ are all enabled, it is expected that \
+ try_is_word_character succeeds" ) })
+ }
+ 
+}
+
+/// A module that looks for word codepoints using regex-automata's data tables
+/// (which are only compiled when regex-syntax's tables aren't available).
+/// 
+/// Note that the cfg should match the one in src/util/unicode_data/mod.rs for
+/// perl_word.
+#[cfg(all(feature = "unicode-word-boundary", not(all(feature = "syntax", feature = "unicode-perl")) ))]
+mod is_word_char {
+ use crate::util::utf8;
+ fn check() -> Result<(), super::UnicodeWordBoundaryError> {
+ Ok(())
+ }
+ 
+ #[cfg_attr(feature = "perf-inline", inline(always))]
+ fn fwd(haystack: &[u8], at: usize) -> Result<bool, super::UnicodeWordBoundaryError> {
+ Ok(match utf8::decode(&haystack [at ..]) { None | Some(Err(_)) => false, Some(Ok(ch)) => is_word_character(ch) })
+ }
+ 
+ #[cfg_attr(feature = "perf-inline", inline(always))]
+ fn rev(haystack: &[u8], at: usize) -> Result<bool, super::UnicodeWordBoundaryError> {
+ Ok(match utf8::decode_last(&haystack [.. at]) { None | Some(Err(_)) => false, Some(Ok(ch)) => is_word_character(ch) })
+ }
+ 
+ #[cfg_attr(feature = "perf-inline", inline(always))]
+ fn is_word_character(c: char) -> bool {
+ use crate::util::{ unicode_data::perl_word::PERL_WORD, utf8 };
+ if u8::try_from(c).map_or(false, utf8::is_word_byte) { return true; }
+ PERL_WORD.binary_search_by(| & (start, end) | { use core::cmp::Ordering; if start <= c &&c <= end { Ordering::Equal } else if start > c { Ordering::Greater } else { Ordering::Less } }).is_ok()
+ }
+ 
+}
+
+/// A module that always returns an error if Unicode word boundaries are
+/// disabled. When this feature is disabled, then regex-automata will not
+/// include its own data tables even if regex-syntax is disabled.
+#[cfg(not(feature = "unicode-word-boundary"))]
+mod is_word_char {
+ fn check() -> Result<(), super::UnicodeWordBoundaryError> {
+ Err(super::UnicodeWordBoundaryError::new())
+ }
+ 
+ #[cfg_attr(feature = "perf-inline", inline(always))]
+ fn fwd(_bytes: &[u8], _at: usize) -> Result<bool, super::UnicodeWordBoundaryError> {
+ Err(super::UnicodeWordBoundaryError::new())
+ }
+ 
+ #[cfg_attr(feature = "perf-inline", inline(always))]
+ fn rev(_bytes: &[u8], _at: usize) -> Result<bool, super::UnicodeWordBoundaryError> {
+ Err(super::UnicodeWordBoundaryError::new())
+ }
+ 
+}
+
+#[cfg(test)]
+mod tests {
+ use super::*;
+ macro_rules ! testlook { ($ look: expr, $ haystack: expr, $ at: expr) => { LookMatcher::default().matches($ look, $ haystack.as_bytes(), $ at) }; }
+ #[test]
+ fn look_matches_start_line() {
+ let look = Look::StartLF;
+ assert!(testlook!(look, "", 0));
+ assert!(testlook!(look, "\n", 0));
+ assert!(testlook!(look, "\n", 1));
+ assert!(testlook!(look, "a", 0));
+ assert!(testlook!(look, "\na", 1));
+ assert!(! testlook!(look, "a", 1));
+ assert!(! testlook!(look, "a\na", 1));
+ }
+ 
+ #[test]
+ fn look_matches_end_line() {
+ let look = Look::EndLF;
+ assert!(testlook!(look, "", 0));
+ assert!(testlook!(look, "\n", 1));
+ assert!(testlook!(look, "\na", 0));
+ assert!(testlook!(look, "\na", 2));
+ assert!(testlook!(look, "a\na", 1));
+ assert!(! testlook!(look, "a", 0));
+ assert!(! testlook!(look, "\na", 1));
+ assert!(! testlook!(look, "a\na", 0));
+ assert!(! testlook!(look, "a\na", 2));
+ }
+ 
+ #[test]
+ fn look_matches_start_text() {
+ let look = Look::Start;
+ assert!(testlook!(look, "", 0));
+ assert!(testlook!(look, "\n", 0));
+ assert!(testlook!(look, "a", 0));
+ assert!(! testlook!(look, "\n", 1));
+ assert!(! testlook!(look, "\na", 1));
+ assert!(! testlook!(look, "a", 1));
+ assert!(! testlook!(look, "a\na", 1));
+ }
+ 
+ #[test]
+ fn look_matches_end_text() {
+ let look = Look::End;
+ assert!(testlook!(look, "", 0));
+ assert!(testlook!(look, "\n", 1));
+ assert!(testlook!(look, "\na", 2));
+ assert!(! testlook!(look, "\na", 0));
+ assert!(! testlook!(look, "a\na", 1));
+ assert!(! testlook!(look, "a", 0));
+ assert!(! testlook!(look, "\na", 1));
+ assert!(! testlook!(look, "a\na", 0));
+ assert!(! testlook!(look, "a\na", 2));
+ }
+ 
+ #[test]
+ #[cfg(all(not(miri), feature = "unicode-word-boundary"))]
+ fn look_matches_word_unicode() {
+ let look = Look::WordUnicode;
+ assert!(testlook!(look, "a", 0));
+ assert!(testlook!(look, "a", 1));
+ assert!(testlook!(look, "a ", 1));
+ assert!(testlook!(look, " a ", 1));
+ assert!(testlook!(look, " a ", 2));
+ assert!(testlook!(look, "𝛃", 0));
+ assert!(testlook!(look, "𝛃", 4));
+ assert!(testlook!(look, "𝛃 ", 4));
+ assert!(testlook!(look, " 𝛃 ", 1));
+ assert!(testlook!(look, " 𝛃 ", 5));
+ assert!(testlook!(look, "𝛃𐆀", 0));
+ assert!(testlook!(look, "𝛃𐆀", 4));
+ assert!(! testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(! testlook!(look, "a ", 2));
+ assert!(! testlook!(look, " a ", 0));
+ assert!(! testlook!(look, " a ", 3));
+ assert!(! testlook!(look, "𝛃b", 4));
+ assert!(! testlook!(look, "𝛃 ", 5));
+ assert!(! testlook!(look, " 𝛃 ", 0));
+ assert!(! testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(! testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ fn look_matches_word_ascii() {
+ let look = Look::WordAscii;
+ assert!(testlook!(look, "a", 0));
+ assert!(testlook!(look, "a", 1));
+ assert!(testlook!(look, "a ", 1));
+ assert!(testlook!(look, " a ", 1));
+ assert!(testlook!(look, " a ", 2));
+ assert!(! testlook!(look, "𝛃", 0));
+ assert!(! testlook!(look, "𝛃", 4));
+ assert!(! testlook!(look, "𝛃 ", 4));
+ assert!(! testlook!(look, " 𝛃 ", 1));
+ assert!(! testlook!(look, " 𝛃 ", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 0));
+ assert!(! testlook!(look, "𝛃𐆀", 4));
+ assert!(! testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(! testlook!(look, "a ", 2));
+ assert!(! testlook!(look, " a ", 0));
+ assert!(! testlook!(look, " a ", 3));
+ assert!(testlook!(look, "𝛃b", 4));
+ assert!(! testlook!(look, "𝛃 ", 5));
+ assert!(! testlook!(look, " 𝛃 ", 0));
+ assert!(! testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(! testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ #[cfg(all(not(miri), feature = "unicode-word-boundary"))]
+ fn look_matches_word_unicode_negate() {
+ let look = Look::WordUnicodeNegate;
+ assert!(! testlook!(look, "a", 0));
+ assert!(! testlook!(look, "a", 1));
+ assert!(! testlook!(look, "a ", 1));
+ assert!(! testlook!(look, " a ", 1));
+ assert!(! testlook!(look, " a ", 2));
+ assert!(! testlook!(look, "𝛃", 0));
+ assert!(! testlook!(look, "𝛃", 4));
+ assert!(! testlook!(look, "𝛃 ", 4));
+ assert!(! testlook!(look, " 𝛃 ", 1));
+ assert!(! testlook!(look, " 𝛃 ", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 0));
+ assert!(! testlook!(look, "𝛃𐆀", 4));
+ assert!(testlook!(look, "", 0));
+ assert!(testlook!(look, "ab", 1));
+ assert!(testlook!(look, "a ", 2));
+ assert!(testlook!(look, " a ", 0));
+ assert!(testlook!(look, " a ", 3));
+ assert!(testlook!(look, "𝛃b", 4));
+ assert!(testlook!(look, "𝛃 ", 5));
+ assert!(testlook!(look, " 𝛃 ", 0));
+ assert!(testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ fn look_matches_word_ascii_negate() {
+ let look = Look::WordAsciiNegate;
+ assert!(! testlook!(look, "a", 0));
+ assert!(! testlook!(look, "a", 1));
+ assert!(! testlook!(look, "a ", 1));
+ assert!(! testlook!(look, " a ", 1));
+ assert!(! testlook!(look, " a ", 2));
+ assert!(testlook!(look, "𝛃", 0));
+ assert!(testlook!(look, "𝛃", 4));
+ assert!(testlook!(look, "𝛃 ", 4));
+ assert!(testlook!(look, " 𝛃 ", 1));
+ assert!(testlook!(look, " 𝛃 ", 5));
+ assert!(testlook!(look, "𝛃𐆀", 0));
+ assert!(testlook!(look, "𝛃𐆀", 4));
+ assert!(testlook!(look, "", 0));
+ assert!(testlook!(look, "ab", 1));
+ assert!(testlook!(look, "a ", 2));
+ assert!(testlook!(look, " a ", 0));
+ assert!(testlook!(look, " a ", 3));
+ assert!(! testlook!(look, "𝛃b", 4));
+ assert!(testlook!(look, "𝛃 ", 5));
+ assert!(testlook!(look, " 𝛃 ", 0));
+ assert!(testlook!(look, " 𝛃 ", 6));
+ assert!(testlook!(look, "𝛃", 1));
+ assert!(testlook!(look, "𝛃", 2));
+ assert!(testlook!(look, "𝛃", 3));
+ assert!(testlook!(look, "𝛃𐆀", 1));
+ assert!(testlook!(look, "𝛃𐆀", 2));
+ assert!(testlook!(look, "𝛃𐆀", 3));
+ assert!(testlook!(look, "𝛃𐆀", 5));
+ assert!(testlook!(look, "𝛃𐆀", 6));
+ assert!(testlook!(look, "𝛃𐆀", 7));
+ assert!(testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ fn look_matches_word_start_ascii() {
+ let look = Look::WordStartAscii;
+ assert!(testlook!(look, "a", 0));
+ assert!(! testlook!(look, "a", 1));
+ assert!(! testlook!(look, "a ", 1));
+ assert!(testlook!(look, " a ", 1));
+ assert!(! testlook!(look, " a ", 2));
+ assert!(! testlook!(look, "𝛃", 0));
+ assert!(! testlook!(look, "𝛃", 4));
+ assert!(! testlook!(look, "𝛃 ", 4));
+ assert!(! testlook!(look, " 𝛃 ", 1));
+ assert!(! testlook!(look, " 𝛃 ", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 0));
+ assert!(! testlook!(look, "𝛃𐆀", 4));
+ assert!(! testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(! testlook!(look, "a ", 2));
+ assert!(! testlook!(look, " a ", 0));
+ assert!(! testlook!(look, " a ", 3));
+ assert!(testlook!(look, "𝛃b", 4));
+ assert!(! testlook!(look, "b𝛃", 1));
+ assert!(! testlook!(look, "𝛃 ", 5));
+ assert!(! testlook!(look, " 𝛃 ", 0));
+ assert!(! testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(! testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ fn look_matches_word_end_ascii() {
+ let look = Look::WordEndAscii;
+ assert!(! testlook!(look, "a", 0));
+ assert!(testlook!(look, "a", 1));
+ assert!(testlook!(look, "a ", 1));
+ assert!(! testlook!(look, " a ", 1));
+ assert!(testlook!(look, " a ", 2));
+ assert!(! testlook!(look, "𝛃", 0));
+ assert!(! testlook!(look, "𝛃", 4));
+ assert!(! testlook!(look, "𝛃 ", 4));
+ assert!(! testlook!(look, " 𝛃 ", 1));
+ assert!(! testlook!(look, " 𝛃 ", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 0));
+ assert!(! testlook!(look, "𝛃𐆀", 4));
+ assert!(! testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(! testlook!(look, "a ", 2));
+ assert!(! testlook!(look, " a ", 0));
+ assert!(! testlook!(look, " a ", 3));
+ assert!(! testlook!(look, "𝛃b", 4));
+ assert!(testlook!(look, "b𝛃", 1));
+ assert!(! testlook!(look, "𝛃 ", 5));
+ assert!(! testlook!(look, " 𝛃 ", 0));
+ assert!(! testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(! testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ #[cfg(all(not(miri), feature = "unicode-word-boundary"))]
+ fn look_matches_word_start_unicode() {
+ let look = Look::WordStartUnicode;
+ assert!(testlook!(look, "a", 0));
+ assert!(! testlook!(look, "a", 1));
+ assert!(! testlook!(look, "a ", 1));
+ assert!(testlook!(look, " a ", 1));
+ assert!(! testlook!(look, " a ", 2));
+ assert!(testlook!(look, "𝛃", 0));
+ assert!(! testlook!(look, "𝛃", 4));
+ assert!(! testlook!(look, "𝛃 ", 4));
+ assert!(testlook!(look, " 𝛃 ", 1));
+ assert!(! testlook!(look, " 𝛃 ", 5));
+ assert!(testlook!(look, "𝛃𐆀", 0));
+ assert!(! testlook!(look, "𝛃𐆀", 4));
+ assert!(! testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(! testlook!(look, "a ", 2));
+ assert!(! testlook!(look, " a ", 0));
+ assert!(! testlook!(look, " a ", 3));
+ assert!(! testlook!(look, "𝛃b", 4));
+ assert!(! testlook!(look, "b𝛃", 1));
+ assert!(! testlook!(look, "𝛃 ", 5));
+ assert!(! testlook!(look, " 𝛃 ", 0));
+ assert!(! testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(! testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ #[cfg(all(not(miri), feature = "unicode-word-boundary"))]
+ fn look_matches_word_end_unicode() {
+ let look = Look::WordEndUnicode;
+ assert!(! testlook!(look, "a", 0));
+ assert!(testlook!(look, "a", 1));
+ assert!(testlook!(look, "a ", 1));
+ assert!(! testlook!(look, " a ", 1));
+ assert!(testlook!(look, " a ", 2));
+ assert!(! testlook!(look, "𝛃", 0));
+ assert!(testlook!(look, "𝛃", 4));
+ assert!(testlook!(look, "𝛃 ", 4));
+ assert!(! testlook!(look, " 𝛃 ", 1));
+ assert!(testlook!(look, " 𝛃 ", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 0));
+ assert!(testlook!(look, "𝛃𐆀", 4));
+ assert!(! testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(! testlook!(look, "a ", 2));
+ assert!(! testlook!(look, " a ", 0));
+ assert!(! testlook!(look, " a ", 3));
+ assert!(! testlook!(look, "𝛃b", 4));
+ assert!(! testlook!(look, "b𝛃", 1));
+ assert!(! testlook!(look, "𝛃 ", 5));
+ assert!(! testlook!(look, " 𝛃 ", 0));
+ assert!(! testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(! testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ fn look_matches_word_start_half_ascii() {
+ let look = Look::WordStartHalfAscii;
+ assert!(testlook!(look, "a", 0));
+ assert!(! testlook!(look, "a", 1));
+ assert!(! testlook!(look, "a ", 1));
+ assert!(testlook!(look, " a ", 1));
+ assert!(! testlook!(look, " a ", 2));
+ assert!(testlook!(look, "𝛃", 0));
+ assert!(testlook!(look, "𝛃", 4));
+ assert!(testlook!(look, "𝛃 ", 4));
+ assert!(testlook!(look, " 𝛃 ", 1));
+ assert!(testlook!(look, " 𝛃 ", 5));
+ assert!(testlook!(look, "𝛃𐆀", 0));
+ assert!(testlook!(look, "𝛃𐆀", 4));
+ assert!(testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(testlook!(look, "a ", 2));
+ assert!(testlook!(look, " a ", 0));
+ assert!(testlook!(look, " a ", 3));
+ assert!(testlook!(look, "𝛃b", 4));
+ assert!(! testlook!(look, "b𝛃", 1));
+ assert!(testlook!(look, "𝛃 ", 5));
+ assert!(testlook!(look, " 𝛃 ", 0));
+ assert!(testlook!(look, " 𝛃 ", 6));
+ assert!(testlook!(look, "𝛃", 1));
+ assert!(testlook!(look, "𝛃", 2));
+ assert!(testlook!(look, "𝛃", 3));
+ assert!(testlook!(look, "𝛃𐆀", 1));
+ assert!(testlook!(look, "𝛃𐆀", 2));
+ assert!(testlook!(look, "𝛃𐆀", 3));
+ assert!(testlook!(look, "𝛃𐆀", 5));
+ assert!(testlook!(look, "𝛃𐆀", 6));
+ assert!(testlook!(look, "𝛃𐆀", 7));
+ assert!(testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ fn look_matches_word_end_half_ascii() {
+ let look = Look::WordEndHalfAscii;
+ assert!(! testlook!(look, "a", 0));
+ assert!(testlook!(look, "a", 1));
+ assert!(testlook!(look, "a ", 1));
+ assert!(! testlook!(look, " a ", 1));
+ assert!(testlook!(look, " a ", 2));
+ assert!(testlook!(look, "𝛃", 0));
+ assert!(testlook!(look, "𝛃", 4));
+ assert!(testlook!(look, "𝛃 ", 4));
+ assert!(testlook!(look, " 𝛃 ", 1));
+ assert!(testlook!(look, " 𝛃 ", 5));
+ assert!(testlook!(look, "𝛃𐆀", 0));
+ assert!(testlook!(look, "𝛃𐆀", 4));
+ assert!(testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(testlook!(look, "a ", 2));
+ assert!(testlook!(look, " a ", 0));
+ assert!(testlook!(look, " a ", 3));
+ assert!(! testlook!(look, "𝛃b", 4));
+ assert!(testlook!(look, "b𝛃", 1));
+ assert!(testlook!(look, "𝛃 ", 5));
+ assert!(testlook!(look, " 𝛃 ", 0));
+ assert!(testlook!(look, " 𝛃 ", 6));
+ assert!(testlook!(look, "𝛃", 1));
+ assert!(testlook!(look, "𝛃", 2));
+ assert!(testlook!(look, "𝛃", 3));
+ assert!(testlook!(look, "𝛃𐆀", 1));
+ assert!(testlook!(look, "𝛃𐆀", 2));
+ assert!(testlook!(look, "𝛃𐆀", 3));
+ assert!(testlook!(look, "𝛃𐆀", 5));
+ assert!(testlook!(look, "𝛃𐆀", 6));
+ assert!(testlook!(look, "𝛃𐆀", 7));
+ assert!(testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ #[cfg(all(not(miri), feature = "unicode-word-boundary"))]
+ fn look_matches_word_start_half_unicode() {
+ let look = Look::WordStartHalfUnicode;
+ assert!(testlook!(look, "a", 0));
+ assert!(! testlook!(look, "a", 1));
+ assert!(! testlook!(look, "a ", 1));
+ assert!(testlook!(look, " a ", 1));
+ assert!(! testlook!(look, " a ", 2));
+ assert!(testlook!(look, "𝛃", 0));
+ assert!(! testlook!(look, "𝛃", 4));
+ assert!(! testlook!(look, "𝛃 ", 4));
+ assert!(testlook!(look, " 𝛃 ", 1));
+ assert!(! testlook!(look, " 𝛃 ", 5));
+ assert!(testlook!(look, "𝛃𐆀", 0));
+ assert!(! testlook!(look, "𝛃𐆀", 4));
+ assert!(testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(testlook!(look, "a ", 2));
+ assert!(testlook!(look, " a ", 0));
+ assert!(testlook!(look, " a ", 3));
+ assert!(! testlook!(look, "𝛃b", 4));
+ assert!(! testlook!(look, "b𝛃", 1));
+ assert!(testlook!(look, "𝛃 ", 5));
+ assert!(testlook!(look, " 𝛃 ", 0));
+ assert!(testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ #[cfg(all(not(miri), feature = "unicode-word-boundary"))]
+ fn look_matches_word_end_half_unicode() {
+ let look = Look::WordEndHalfUnicode;
+ assert!(! testlook!(look, "a", 0));
+ assert!(testlook!(look, "a", 1));
+ assert!(testlook!(look, "a ", 1));
+ assert!(! testlook!(look, " a ", 1));
+ assert!(testlook!(look, " a ", 2));
+ assert!(! testlook!(look, "𝛃", 0));
+ assert!(testlook!(look, "𝛃", 4));
+ assert!(testlook!(look, "𝛃 ", 4));
+ assert!(! testlook!(look, " 𝛃 ", 1));
+ assert!(testlook!(look, " 𝛃 ", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 0));
+ assert!(testlook!(look, "𝛃𐆀", 4));
+ assert!(testlook!(look, "", 0));
+ assert!(! testlook!(look, "ab", 1));
+ assert!(testlook!(look, "a ", 2));
+ assert!(testlook!(look, " a ", 0));
+ assert!(testlook!(look, " a ", 3));
+ assert!(! testlook!(look, "𝛃b", 4));
+ assert!(! testlook!(look, "b𝛃", 1));
+ assert!(testlook!(look, "𝛃 ", 5));
+ assert!(testlook!(look, " 𝛃 ", 0));
+ assert!(testlook!(look, " 𝛃 ", 6));
+ assert!(! testlook!(look, "𝛃", 1));
+ assert!(! testlook!(look, "𝛃", 2));
+ assert!(! testlook!(look, "𝛃", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 1));
+ assert!(! testlook!(look, "𝛃𐆀", 2));
+ assert!(! testlook!(look, "𝛃𐆀", 3));
+ assert!(! testlook!(look, "𝛃𐆀", 5));
+ assert!(! testlook!(look, "𝛃𐆀", 6));
+ assert!(! testlook!(look, "𝛃𐆀", 7));
+ assert!(testlook!(look, "𝛃𐆀", 8));
+ }
+ 
+ #[test]
+ fn look_set() {
+ let mut f = LookSet::default();
+ assert!(! f.contains(Look::Start));
+ assert!(! f.contains(Look::End));
+ assert!(! f.contains(Look::StartLF));
+ assert!(! f.contains(Look::EndLF));
+ assert!(! f.contains(Look::WordUnicode));
+ assert!(! f.contains(Look::WordUnicodeNegate));
+ assert!(! f.contains(Look::WordAscii));
+ assert!(! f.contains(Look::WordAsciiNegate));
+ f = f.insert(Look::Start);
+ assert!(f.contains(Look::Start));
+ f = f.remove(Look::Start);
+ assert!(! f.contains(Look::Start));
+ f = f.insert(Look::End);
+ assert!(f.contains(Look::End));
+ f = f.remove(Look::End);
+ assert!(! f.contains(Look::End));
+ f = f.insert(Look::StartLF);
+ assert!(f.contains(Look::StartLF));
+ f = f.remove(Look::StartLF);
+ assert!(! f.contains(Look::StartLF));
+ f = f.insert(Look::EndLF);
+ assert!(f.contains(Look::EndLF));
+ f = f.remove(Look::EndLF);
+ assert!(! f.contains(Look::EndLF));
+ f = f.insert(Look::StartCRLF);
+ assert!(f.contains(Look::StartCRLF));
+ f = f.remove(Look::StartCRLF);
+ assert!(! f.contains(Look::StartCRLF));
+ f = f.insert(Look::EndCRLF);
+ assert!(f.contains(Look::EndCRLF));
+ f = f.remove(Look::EndCRLF);
+ assert!(! f.contains(Look::EndCRLF));
+ f = f.insert(Look::WordUnicode);
+ assert!(f.contains(Look::WordUnicode));
+ f = f.remove(Look::WordUnicode);
+ assert!(! f.contains(Look::WordUnicode));
+ f = f.insert(Look::WordUnicodeNegate);
+ assert!(f.contains(Look::WordUnicodeNegate));
+ f = f.remove(Look::WordUnicodeNegate);
+ assert!(! f.contains(Look::WordUnicodeNegate));
+ f = f.insert(Look::WordAscii);
+ assert!(f.contains(Look::WordAscii));
+ f = f.remove(Look::WordAscii);
+ assert!(! f.contains(Look::WordAscii));
+ f = f.insert(Look::WordAsciiNegate);
+ assert!(f.contains(Look::WordAsciiNegate));
+ f = f.remove(Look::WordAsciiNegate);
+ assert!(! f.contains(Look::WordAsciiNegate));
+ f = f.insert(Look::WordStartAscii);
+ assert!(f.contains(Look::WordStartAscii));
+ f = f.remove(Look::WordStartAscii);
+ assert!(! f.contains(Look::WordStartAscii));
+ f = f.insert(Look::WordEndAscii);
+ assert!(f.contains(Look::WordEndAscii));
+ f = f.remove(Look::WordEndAscii);
+ assert!(! f.contains(Look::WordEndAscii));
+ f = f.insert(Look::WordStartUnicode);
+ assert!(f.contains(Look::WordStartUnicode));
+ f = f.remove(Look::WordStartUnicode);
+ assert!(! f.contains(Look::WordStartUnicode));
+ f = f.insert(Look::WordEndUnicode);
+ assert!(f.contains(Look::WordEndUnicode));
+ f = f.remove(Look::WordEndUnicode);
+ assert!(! f.contains(Look::WordEndUnicode));
+ f = f.insert(Look::WordStartHalfAscii);
+ assert!(f.contains(Look::WordStartHalfAscii));
+ f = f.remove(Look::WordStartHalfAscii);
+ assert!(! f.contains(Look::WordStartHalfAscii));
+ f = f.insert(Look::WordEndHalfAscii);
+ assert!(f.contains(Look::WordEndHalfAscii));
+ f = f.remove(Look::WordEndHalfAscii);
+ assert!(! f.contains(Look::WordEndHalfAscii));
+ f = f.insert(Look::WordStartHalfUnicode);
+ assert!(f.contains(Look::WordStartHalfUnicode));
+ f = f.remove(Look::WordStartHalfUnicode);
+ assert!(! f.contains(Look::WordStartHalfUnicode));
+ f = f.insert(Look::WordEndHalfUnicode);
+ assert!(f.contains(Look::WordEndHalfUnicode));
+ f = f.remove(Look::WordEndHalfUnicode);
+ assert!(! f.contains(Look::WordEndHalfUnicode));
+ }
+ 
+ #[test]
+ fn look_set_iter() {
+ let set = LookSet::empty();
+ assert_eq!(0, set.iter().count());
+ let set = LookSet::full();
+ assert_eq!(18, set.iter().count());
+ let set = LookSet::empty().insert(Look::StartLF).insert(Look::WordUnicode);
+ assert_eq!(2, set.iter().count());
+ let set = LookSet::empty().insert(Look::StartLF);
+ assert_eq!(1, set.iter().count());
+ let set = LookSet::empty().insert(Look::WordAsciiNegate);
+ assert_eq!(1, set.iter().count());
+ let set = LookSet::empty().insert(Look::WordEndHalfUnicode);
+ assert_eq!(1, set.iter().count());
+ }
+ 
+ #[test]
+ #[cfg(feature = "alloc")]
+ fn look_set_debug() {
+ let res = alloc::format!("{:?}", LookSet::empty());
+ assert_eq!("∅", res);
+ let res = alloc::format!("{:?}", LookSet::full());
+ assert_eq!("Az^$rRbB𝛃𝚩<>〈〉◁▷◀▶", res);
+ }
+ 
+}
+

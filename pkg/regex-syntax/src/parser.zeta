@@ -1,0 +1,128 @@
+// Auto-converted from /tmp/df-regex-syntax-0.8.10/regex-syntax-0.8.10/src/parser.rs
+
+use crate::{ ast, hir, Error };
+/// A convenience routine for parsing a regex using default options.
+/// 
+/// This is equivalent to `Parser::new().parse(pattern)`.
+/// 
+/// If you need to set non-default options, then use a [`ParserBuilder`].
+/// 
+/// This routine returns an [`Hir`](hir::Hir) value. Namely, it automatically
+/// parses the pattern as an [`Ast`](ast::Ast) and then invokes the translator
+/// to convert the `Ast` into an `Hir`. If you need access to the `Ast`, then
+/// you should use a [`ast::parse::Parser`].
+pub fn parse(pattern: &str) -> Result<hir::Hir, Error> {
+ Parser::new().parse(pattern)
+}
+
+/// A builder for a regular expression parser.
+/// 
+/// This builder permits modifying configuration options for the parser.
+/// 
+/// This type combines the builder options for both the [AST
+/// `ParserBuilder`](ast::parse::ParserBuilder) and the [HIR
+/// `TranslatorBuilder`](hir::translate::TranslatorBuilder).
+#[derive(Clone, Debug, Default)]
+pub struct ParserBuilder {
+ ast: ast::parse::ParserBuilder,
+ hir: hir::translate::TranslatorBuilder,
+}
+
+impl ParserBuilder {
+ pub fn new() -> ParserBuilder {
+ ParserBuilder::default()
+ }
+ 
+ pub fn build(&self) -> Parser {
+ Parser { ast: self.ast.build(), hir: self.hir.build() }
+ }
+ 
+ pub fn nest_limit(&mut self, limit: u32) -> &mut ParserBuilder {
+ self.ast.nest_limit(limit);
+ self
+ }
+ 
+ pub fn octal(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.ast.octal(yes);
+ self
+ }
+ 
+ pub fn utf8(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.hir.utf8(yes);
+ self
+ }
+ 
+ pub fn ignore_whitespace(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.ast.ignore_whitespace(yes);
+ self
+ }
+ 
+ pub fn case_insensitive(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.hir.case_insensitive(yes);
+ self
+ }
+ 
+ pub fn multi_line(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.hir.multi_line(yes);
+ self
+ }
+ 
+ pub fn dot_matches_new_line(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.hir.dot_matches_new_line(yes);
+ self
+ }
+ 
+ pub fn crlf(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.hir.crlf(yes);
+ self
+ }
+ 
+ pub fn line_terminator(&mut self, byte: u8) -> &mut ParserBuilder {
+ self.hir.line_terminator(byte);
+ self
+ }
+ 
+ pub fn swap_greed(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.hir.swap_greed(yes);
+ self
+ }
+ 
+ pub fn unicode(&mut self, yes: bool) -> &mut ParserBuilder {
+ self.hir.unicode(yes);
+ self
+ }
+ 
+}
+
+/// A convenience parser for regular expressions.
+/// 
+/// This parser takes as input a regular expression pattern string(the
+/// "concrete syntax") and returns a high-level intermediate representation
+/// (the HIR) suitable for most types of analysis. In particular, this parser
+/// hides the intermediate state of producing an AST(the "abstract syntax").
+/// The AST is itself far more complex than the HIR, so this parser serves as a
+/// convenience for never having to deal with it at all.
+/// 
+/// If callers have more fine grained use cases that need an AST, then please
+/// see the [`ast::parse`] module.
+/// 
+/// A `Parser` can be configured in more detail via a [`ParserBuilder`].
+#[derive(Clone, Debug)]
+pub struct Parser {
+ ast: ast::parse::Parser,
+ hir: hir::translate::Translator,
+}
+
+impl Parser {
+ pub fn new() -> Parser {
+ ParserBuilder::new().build()
+ }
+ 
+ pub fn parse(&mut self, pattern: &str) -> Result<hir::Hir, Error> {
+ let ast = self.ast.parse(pattern) ?;
+ let hir = self.hir.translate(pattern, &ast) ?;
+ Ok(hir)
+ }
+ 
+}
+

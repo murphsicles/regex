@@ -1,0 +1,23 @@
+// Auto-converted from /tmp/df-regex-1.12.3/regex-1.12.3/src/lib.rs
+
+#[cfg(doctest)] doc_comment::doctest!("../README.md");
+// [unsupported item]
+// [unsupported item]
+pub use crate::error::Error;
+pub use crate::{ builders::string::*, regex::string::*, regexset::string::* };
+mod builders;
+pub mod bytes;
+mod error;
+mod find_byte;
+#[cfg(feature = "pattern")]
+mod pattern;
+mod regex;
+mod regexset;
+/// Escapes all regular expression meta characters in `pattern`.
+/// 
+/// The string returned may be safely used as a literal in a regular
+/// expression.
+pub fn escape(pattern: &str) -> alloc::string::String {
+ regex_syntax::escape(pattern)
+}
+

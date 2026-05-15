@@ -1,0 +1,4 @@
+// Auto-converted from /tmp/df-regex-automata-0.4.14/regex-automata-0.4.14/src/nfa/mod.rs
+
+#[cfg(feature = "nfa-thompson")]
+pub mod thompson;

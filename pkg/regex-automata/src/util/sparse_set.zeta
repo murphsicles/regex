@@ -1,0 +1,145 @@
+// Auto-converted from /tmp/df-regex-automata-0.4.14/regex-automata-0.4.14/src/util/sparse_set.rs
+
+use alloc::{ vec, vec::Vec };
+use crate::util::primitives::StateID;
+/// A pair of sparse sets.
+/// 
+/// This is useful when one needs to compute NFA epsilon closures from a
+/// previous set of states derived from an epsilon closure. One set can be the
+/// starting states where as the other set can be the destination states after
+/// following the transitions for a particular byte of input.
+/// 
+/// There is no significance to 'set1' or 'set2'. They are both sparse sets of
+/// the same size.
+/// 
+/// The members of this struct are exposed so that callers may borrow 'set1'
+/// and 'set2' individually without being force to borrow both at the same
+/// time.
+#[derive(Clone, Debug)]
+struct SparseSets {
+ set1: SparseSet,
+ set2: SparseSet,
+}
+
+impl SparseSets {
+ fn new(capacity: usize) -> SparseSets {
+ SparseSets { set1: SparseSet::new(capacity), set2: SparseSet::new(capacity) }
+ }
+ 
+ fn resize(&mut self, new_capacity: usize) {
+ self.set1.resize(new_capacity);
+ self.set2.resize(new_capacity);
+ }
+ 
+ fn clear(&mut self) {
+ self.set1.clear();
+ self.set2.clear();
+ }
+ 
+ fn swap(&mut self) {
+ core::mem::swap(&mut self.set1, &mut self.set2);
+ }
+ 
+ fn memory_usage(&self) -> usize {
+ self.set1.memory_usage() + self.set2.memory_usage()
+ }
+ 
+}
+
+/// A sparse set used for representing ordered NFA states.
+/// 
+/// This supports constant time addition and membership testing. Clearing an
+/// entire set can also be done in constant time. Iteration yields elements
+/// in the order in which they were inserted.
+/// 
+/// The data structure is based on: https://research.swtch.com/sparse
+/// Note though that we don't actually use uninitialized memory. We generally
+/// reuse sparse sets, so the initial allocation cost is bearable. However, its
+/// other properties listed above are extremely useful.
+#[derive(Clone)]
+struct SparseSet {
+ len: usize,
+ dense: Vec<StateID>,
+ sparse: Vec<StateID>,
+}
+
+impl SparseSet {
+ fn new(capacity: usize) -> SparseSet {
+ let mut set = SparseSet { len: 0, dense: vec ! [], sparse: vec ! [] };
+ set.resize(capacity);
+ set
+ }
+ 
+ fn resize(&mut self, new_capacity: usize) {
+ assert!(new_capacity <= StateID::LIMIT, "sparse set capacity cannot exceed {:?}", StateID::LIMIT);
+ self.clear();
+ self.dense.resize(new_capacity, StateID::ZERO);
+ self.sparse.resize(new_capacity, StateID::ZERO);
+ }
+ 
+ fn capacity(&self) -> usize {
+ self.dense.len()
+ }
+ 
+ fn len(&self) -> usize {
+ self.len
+ }
+ 
+ fn is_empty(&self) -> bool {
+ self.len() == 0
+ }
+ 
+ fn insert(&mut self, id: StateID) -> bool {
+ if self.contains(id) { return false; }
+ let i = self.len();
+ assert!(i<self.capacity(), "{:?} exceeds capacity of {:?} when inserting {:?}", i, self.capacity(), id );
+ let index = StateID::new_unchecked(i);
+ self.dense [index] = id;
+ self.sparse [id] = index;
+ self.len += 1;
+ true
+ }
+ 
+ fn contains(&self, id: StateID) -> bool {
+ let index = self.sparse [id];
+ index.as_usize()<self.len() &&self.dense [index] == id
+ }
+ 
+ fn clear(&mut self) {
+ self.len = 0;
+ }
+ 
+ fn iter(&self) -> SparseSetIter<'_> {
+ SparseSetIter(self.dense [.. self.len()] . iter())
+ }
+ 
+ fn memory_usage(&self) -> usize {
+ self.dense.len() * StateID::SIZE + self.sparse.len() * StateID::SIZE
+ }
+ 
+}
+
+impl core::fmt::Debug for SparseSet {
+ fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+ let _ = self.iter().collect();
+ f.debug_tuple("SparseSet").field(&elements).finish()
+ }
+ 
+}
+
+/// An iterator over all elements in a sparse set.
+/// 
+/// The lifetime `'a` refers to the lifetime of the set being iterated over.
+#[derive(Debug)]
+struct SparseSetIter<a> {
+ (core::slice::Iter<'a, StateID>),
+}
+
+impl<a> Iterator for SparseSetIter<'a> {
+ type Item = StateID;
+ fn next(&mut self) -> Option<StateID> {
+ self.0.next().copied()
+ }
+ 
+}
+

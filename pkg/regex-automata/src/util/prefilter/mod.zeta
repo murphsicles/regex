@@ -1,0 +1,267 @@
+// Auto-converted from /tmp/df-regex-automata-0.4.14/regex-automata-0.4.14/src/util/prefilter/mod.rs
+
+mod aho_corasick;
+mod byteset;
+mod memchr;
+mod memmem;
+mod teddy;
+use core::{ borrow::Borrow, fmt::Debug, panic::{ RefUnwindSafe, UnwindSafe } };
+#[cfg(feature = "alloc")] use alloc::sync::Arc;
+#[cfg(feature = "syntax")] use regex_syntax::hir::{ literal, Hir };
+use crate::util::search::{ MatchKind, Span };
+pub(crate) use crate::util::prefilter::{ aho_corasick::AhoCorasick, byteset::ByteSet, memchr::{ Memchr, Memchr2, Memchr3 }, memmem::Memmem, teddy::Teddy };
+/// A prefilter for accelerating regex searches.
+/// 
+/// If you already have your literals that you want to search with,
+/// then the vanilla [`Prefilter::new`] constructor is for you. But
+/// if you have an [`Hir`] value from the `regex-syntax` crate, then
+/// [`Prefilter::from_hir_prefix`] might be more convenient. Namely, it uses
+/// the [`regex-syntax::hir::literal`](regex_syntax::hir::literal) module to
+/// extract literal prefixes for you, optimize them and then select and build a
+/// prefilter matcher.
+/// 
+/// A prefilter must have **zero false negatives**. However, by its very
+/// nature, it may produce false positives. That is, a prefilter will never
+/// skip over a position in the haystack that corresponds to a match of the
+/// original regex pattern, but it *may* produce a match for a position
+/// in the haystack that does *not* correspond to a match of the original
+/// regex pattern. If you use either the [`Prefilter::from_hir_prefix`] or
+/// [`Prefilter::from_hirs_prefix`] constructors, then this guarantee is
+/// upheld for you automatically. This guarantee is not preserved if you use
+/// [`Prefilter::new`] though, since it is up to the caller to provide correct
+/// literal strings with respect to the original regex pattern.
+/// 
+/// # Cloning
+/// 
+/// It is an API guarantee that cloning a prefilter is cheap. That is, cloning
+/// it will not duplicate whatever heap memory is used to represent the
+/// underlying matcher.
+/// 
+/// # Example
+/// 
+/// This example shows how to attach a `Prefilter` to the
+/// [`PikeVM`](crate::nfa::thompson::pikevm::PikeVM) in order to accelerate
+/// searches.
+/// 
+/// ```
+/// use regex_automata::{
+/// nfa::thompson::pikevm::PikeVM,
+/// util::prefilter::Prefilter,
+/// Match, MatchKind,
+/// };
+/// 
+/// let pre = Prefilter::new(MatchKind::LeftmostFirst, &["Bruce "])
+/// .expect("a prefilter");
+/// let re = PikeVM::builder()
+/// .configure(PikeVM::config().prefilter(Some(pre)))
+/// .build(r"Bruce \w+")?;
+/// let mut cache = re.create_cache();
+/// assert_eq!(
+/// Some(Match::must(0, 6..23)),
+/// re.find(&mut cache, "Hello Bruce Springsteen!"),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+/// 
+/// But note that if you get your prefilter incorrect, it could lead to an
+/// incorrect result!
+/// 
+/// ```
+/// use regex_automata::{
+/// nfa::thompson::pikevm::PikeVM,
+/// util::prefilter::Prefilter,
+/// Match, MatchKind,
+/// };
+/// 
+/// // This prefilter is wrong!
+/// let pre = Prefilter::new(MatchKind::LeftmostFirst, &["Patti "])
+/// .expect("a prefilter");
+/// let re = PikeVM::builder()
+/// .configure(PikeVM::config().prefilter(Some(pre)))
+/// .build(r"Bruce \w+")?;
+/// let mut cache = re.create_cache();
+/// // We find no match even though the regex does match.
+/// assert_eq!(
+/// None,
+/// re.find(&mut cache, "Hello Bruce Springsteen!"),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Debug)]
+pub struct Prefilter {
+ _unused: (),
+ pre: Arc<_>,
+ is_fast: bool,
+ max_needle_len: usize,
+}
+
+impl Prefilter {
+ pub fn new(kind: MatchKind, needles: &[B]) -> Option<Prefilter> {
+ Choice::new(kind, needles).and_then(| choice | { let max_needle_len = needles.iter().map(| b | b.as_ref().len()).max().unwrap_or(0); Prefilter::from_choice(choice, max_needle_len) })
+ }
+ 
+ fn from_choice(choice: Choice, max_needle_len: usize) -> Option<Prefilter> {
+ #[cfg(not(feature = "alloc"))] { None }
+ #[cfg(feature = "alloc")] { let pre: Arc<dyn PrefilterI> = match choice { Choice::Memchr(p) => Arc::new(p), Choice::Memchr2(p) => Arc::new(p), Choice::Memchr3(p) => Arc::new(p), Choice::Memmem(p) => Arc::new(p), Choice::Teddy(p) => Arc::new(p), Choice::ByteSet(p) => Arc::new(p), Choice::AhoCorasick(p) => Arc::new(p) }; let is_fast = pre.is_fast(); Some(Prefilter { pre, is_fast, max_needle_len }) }
+ }
+ 
+ pub fn from_hir_prefix(kind: MatchKind, hir: &Hir) -> Option<Prefilter> {
+ Prefilter::from_hirs_prefix(kind, & [hir])
+ }
+ 
+ pub fn from_hirs_prefix(kind: MatchKind, hirs: &[H]) -> Option<Prefilter> {
+ prefixes(kind, hirs).literals().and_then(| lits | Prefilter::new(kind, lits))
+ }
+ 
+ pub fn find(&self, haystack: &[u8], span: Span) -> Option<Span> {
+ #[cfg(not(feature = "alloc"))] { unreachable!() }
+ #[cfg(feature = "alloc")] { self.pre.find(haystack, span) }
+ }
+ 
+ pub fn prefix(&self, haystack: &[u8], span: Span) -> Option<Span> {
+ #[cfg(not(feature = "alloc"))] { unreachable!() }
+ #[cfg(feature = "alloc")] { self.pre.prefix(haystack, span) }
+ }
+ 
+ pub fn memory_usage(&self) -> usize {
+ #[cfg(not(feature = "alloc"))] { unreachable!() }
+ #[cfg(feature = "alloc")] { self.pre.memory_usage() }
+ }
+ 
+ pub fn max_needle_len(&self) -> usize {
+ #[cfg(not(feature = "alloc"))] { unreachable!() }
+ #[cfg(feature = "alloc")] { self.max_needle_len }
+ }
+ 
+ pub fn is_fast(&self) -> bool {
+ #[cfg(not(feature = "alloc"))] { unreachable!() }
+ #[cfg(feature = "alloc")] { self.is_fast }
+ }
+ 
+}
+
+/// A trait for abstracting over prefilters. Basically, a prefilter is
+/// something that do an unanchored *and* an anchored search in a haystack
+/// within a given span.
+/// 
+/// This exists pretty much only so that we can use prefilters as a trait
+/// object(which is what `Prefilter` is). If we ever move off of trait objects
+/// and to an enum, then it's likely this trait could be removed.
+trait PrefilterI {
+ fn find(&self, haystack: &[u8], span: Span) -> Option<Span>;
+ fn prefix(&self, haystack: &[u8], span: Span) -> Option<Span>;
+ fn memory_usage(&self) -> usize;
+ fn is_fast(&self) -> bool
+}
+
+#[cfg(feature = "alloc")]
+impl<P: PrefilterI + Sized> PrefilterI for Arc<P> {
+ fn find(&self, haystack: &[u8], span: Span) -> Option<Span> {
+ (* *self).find(haystack, span)
+ }
+ 
+ fn prefix(&self, haystack: &[u8], span: Span) -> Option<Span> {
+ (* *self).prefix(haystack, span)
+ }
+ 
+ fn memory_usage(&self) -> usize {
+ (* *self).memory_usage()
+ }
+ 
+ fn is_fast(&self) -> bool {
+ (&* *self).is_fast()
+ }
+ 
+}
+
+/// A type that encapsulates the selection of a prefilter algorithm from a
+/// sequence of needles.
+/// 
+/// The existence of this type is a little tricky, because we don't(currently)
+/// use it for performing a search. Instead, we really only consume it by
+/// converting the underlying prefilter into a trait object, whether that be
+/// `dyn PrefilterI` or `dyn Strategy` (for the meta regex engine). In order
+/// to avoid re-copying the prefilter selection logic, we isolate it here, and
+/// then force anything downstream that wants to convert it to a trait object
+/// to do trivial case analysis on it.
+/// 
+/// One wonders whether we *should* use an enum instead of a trait object.
+/// At time of writing, I chose trait objects based on instinct because 1) I
+/// knew I wasn't going to inline anything and 2) there would potentially be
+/// many different choices. However, as of time of writing, I haven't actually
+/// compared the trait object approach to the enum approach. That probably
+/// should be litigated, but I ran out of steam.
+/// 
+/// Note that if the `alloc` feature is disabled, then values of this type
+/// are(and should) never be constructed. Also, in practice, for any of the
+/// prefilters to be selected, you'll need at least one of the `perf-literal-*`
+/// features enabled.
+#[derive(Clone, Debug)]
+enum Choice {
+ Memchr(Memchr),
+ Memchr2(Memchr2),
+ Memchr3(Memchr3),
+ Memmem(Memmem),
+ Teddy(Teddy),
+ ByteSet(ByteSet),
+ AhoCorasick(AhoCorasick),
+}
+
+impl Choice {
+ fn new(kind: MatchKind, needles: &[B]) -> Option<Choice> {
+ if needles.len() == 0 { debug!("prefilter building failed: found empty set of literals"); return None; }
+ if needles.iter().any(| n | n.as_ref().is_empty()) { debug!("prefilter building failed: literals match empty string"); return None; }
+ if let Some(pre) = Memchr::new(kind, needles) { debug!("prefilter built: memchr"); return Some(Choice::Memchr(pre)); }
+ if let Some(pre) = Memchr2::new(kind, needles) { debug!("prefilter built: memchr2"); return Some(Choice::Memchr2(pre)); }
+ if let Some(pre) = Memchr3::new(kind, needles) { debug!("prefilter built: memchr3"); return Some(Choice::Memchr3(pre)); }
+ if let Some(pre) = Memmem::new(kind, needles) { debug!("prefilter built: memmem"); return Some(Choice::Memmem(pre)); }
+ if let Some(pre) = Teddy::new(kind, needles) { debug!("prefilter built: teddy"); return Some(Choice::Teddy(pre)); }
+ if let Some(pre) = ByteSet::new(kind, needles) { debug!("prefilter built: byteset"); return Some(Choice::ByteSet(pre)); }
+ if let Some(pre) = AhoCorasick::new(kind, needles) { debug!("prefilter built: aho-corasick"); return Some(Choice::AhoCorasick(pre)); }
+ debug!("prefilter building failed: no strategy could be found");
+ None
+ }
+ 
+}
+
+/// Extracts all of the prefix literals from the given HIR expressions into a
+/// single `Seq`. The literals in the sequence are ordered with respect to the
+/// order of the given HIR expressions and consistent with the match semantics
+/// given.
+/// 
+/// The sequence returned is "optimized." That is, they may be shrunk or even
+/// truncated according to heuristics with the intent of making them more
+/// useful as a prefilter. (Which translates to both using faster algorithms
+/// and minimizing the false positive rate.)
+/// 
+/// Note that this erases any connection between the literals and which pattern
+/// (or patterns) they came from.
+/// 
+/// The match kind given must correspond to the match semantics of the regex
+/// that is represented by the HIRs given. The match semantics may change the
+/// literal sequence returned.
+#[cfg(feature = "syntax")]
+fn prefixes<H>(kind: MatchKind, hirs: &[H]) -> literal::Seq where H: core::borrow::Borrow<Hir> {
+ let mut extractor = literal::Extractor::new();
+ extractor.kind(literal::ExtractKind::Prefix);
+ let mut prefixes = literal::Seq::empty();
+ for hir in hirs { prefixes.union(&mut extractor.extract(hir.borrow())); }
+ debug!("prefixes(len={:?}, exact={:?}) extracted before optimization: {:?}", prefixes.len(), prefixes.is_exact(), prefixes);
+ match kind { MatchKind::All => { prefixes.sort(); prefixes.dedup(); } MatchKind::LeftmostFirst => { prefixes.optimize_for_prefix_by_preference(); } }
+ debug!("prefixes(len={:?}, exact={:?}) extracted after optimization: {:?}", prefixes.len(), prefixes.is_exact(), prefixes);
+ prefixes
+}
+
+/// Like `prefixes`, but for all suffixes of all matches for the given HIRs.
+#[cfg(feature = "syntax")]
+fn suffixes<H>(kind: MatchKind, hirs: &[H]) -> literal::Seq where H: core::borrow::Borrow<Hir> {
+ let mut extractor = literal::Extractor::new();
+ extractor.kind(literal::ExtractKind::Suffix);
+ let mut suffixes = literal::Seq::empty();
+ for hir in hirs { suffixes.union(&mut extractor.extract(hir.borrow())); }
+ debug!("suffixes(len={:?}, exact={:?}) extracted before optimization: {:?}", suffixes.len(), suffixes.is_exact(), suffixes);
+ match kind { MatchKind::All => { suffixes.sort(); suffixes.dedup(); } MatchKind::LeftmostFirst => { suffixes.optimize_for_suffix_by_preference(); } }
+ debug!("suffixes(len={:?}, exact={:?}) extracted after optimization: {:?}", suffixes.len(), suffixes.is_exact(), suffixes);
+ suffixes
+}
+

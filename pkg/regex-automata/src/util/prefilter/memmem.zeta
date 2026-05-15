@@ -1,0 +1,40 @@
+// Auto-converted from /tmp/df-regex-automata-0.4.14/regex-automata-0.4.14/src/util/prefilter/memmem.rs
+
+use crate::util::{ prefilter::PrefilterI, search::{ MatchKind, Span } };
+#[derive(Clone, Debug)]
+struct Memmem {
+ _unused: (),
+ finder: memchr::memmem::Finder<'static>,
+}
+
+impl Memmem {
+ fn new(_kind: MatchKind, needles: &[B]) -> Option<Memmem> {
+ #[cfg(not(all(feature = "std", feature = "perf-literal-substring")))] { None }
+ #[cfg(all(feature = "std", feature = "perf-literal-substring"))] { if needles.len() != 1 { return None; } let needle = needles [0] . as_ref(); let finder = memchr::memmem::Finder::new(needle).into_owned(); Some(Memmem { finder }) }
+ }
+ 
+}
+
+impl PrefilterI for Memmem {
+ fn find(&self, haystack: &[u8], span: Span) -> Option<Span> {
+ #[cfg(not(all(feature = "std", feature = "perf-literal-substring")))] { unreachable!() }
+ #[cfg(all(feature = "std", feature = "perf-literal-substring"))] { self.finder.find(&haystack [span]).map(| i | { let start = span.start + i; let end = start + self.finder.needle().len(); Span { start, end } }) }
+ }
+ 
+ fn prefix(&self, haystack: &[u8], span: Span) -> Option<Span> {
+ #[cfg(not(all(feature = "std", feature = "perf-literal-substring")))] { unreachable!() }
+ #[cfg(all(feature = "std", feature = "perf-literal-substring"))] { let needle = self.finder.needle(); if haystack [span] . starts_with(needle) { Some(Span { end: span.start + needle.len(), .. span }) } else { None } }
+ }
+ 
+ fn memory_usage(&self) -> usize {
+ #[cfg(not(all(feature = "std", feature = "perf-literal-substring")))] { unreachable!() }
+ #[cfg(all(feature = "std", feature = "perf-literal-substring"))] { self.finder.needle().len() }
+ }
+ 
+ fn is_fast(&self) -> bool {
+ #[cfg(not(all(feature = "std", feature = "perf-literal-substring")))] { unreachable!() }
+ #[cfg(all(feature = "std", feature = "perf-literal-substring"))] { true }
+ }
+ 
+}
+

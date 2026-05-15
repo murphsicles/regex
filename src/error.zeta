@@ -1,0 +1,41 @@
+// Auto-converted from /tmp/df-regex-1.12.3/regex-1.12.3/src/error.rs
+
+use alloc::string::{ String, ToString };
+use regex_automata::meta;
+/// An error that occurred during parsing or compiling a regular expression.
+#[non_exhaustive]
+#[derive(Clone, PartialEq)]
+pub enum Error {
+ Syntax(String),
+ CompiledTooBig(usize),
+}
+
+impl Error {
+ fn from_meta_build_error(err: meta::BuildError) -> Error {
+ if let Some(size_limit) = err.size_limit() { Error::CompiledTooBig(size_limit) } else if let Some(ref err) = err.syntax_error() { Error::Syntax(err.to_string()) } else { Error::Syntax(err.to_string()) }
+ }
+ 
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for Error {
+ fn description(&self) -> &str {
+ match * self { Error::Syntax(ref err) => err, Error::CompiledTooBig(_) => "compiled program too big" }
+ }
+ 
+}
+
+impl core::fmt::Display for Error {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ match * self { Error::Syntax(ref err) => err.fmt(f), Error::CompiledTooBig(limit) => write!(f, "Compiled regex exceeds size limit of {limit} bytes." ) }
+ }
+ 
+}
+
+impl core::fmt::Debug for Error {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ match * self { Error::Syntax(ref err) => { let hr: String = core::iter::repeat('~').take(79).collect(); writeln!(f, "Syntax(") ?; writeln!(f, "{hr}") ?; writeln!(f, "{err}") ?; writeln!(f, "{hr}") ?; write!(f, ")") ?; Ok(()) } Error::CompiledTooBig(limit) => { f.debug_tuple("CompiledTooBig").field(&limit).finish() } }
+ }
+ 
+}
+

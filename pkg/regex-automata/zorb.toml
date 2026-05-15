@@ -1,0 +1,7 @@
+[package]
+name = "@stdlib/regex-automata"
+version = "0.4.14"
+description = "Regular expressions for Zeta"
+license = "MIT"
+repository = "https://github.com/murphsicles/regex"
+readme = "README.md"

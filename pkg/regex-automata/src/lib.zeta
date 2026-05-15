@@ -1,0 +1,19 @@
+// Auto-converted from /tmp/df-regex-automata-0.4.14/regex-automata-0.4.14/src/lib.rs
+
+#[cfg(not(any(target_pointer_width = "16", target_pointer_width = "32", target_pointer_width = "64")))] compile_error!("not supported on non-{16,32,64}, please file an issue");
+// [unsupported item]
+// [unsupported item]
+#[cfg(doctest)] doc_comment::doctest!("../README.md");
+#[doc(inline)] pub use crate::util::primitives::PatternID;
+pub use crate::util::search::*;
+#[macro_use]
+mod macros;
+#[cfg(any(feature = "dfa-search", feature = "dfa-onepass"))]
+pub mod dfa;
+#[cfg(feature = "hybrid")]
+pub mod hybrid;
+#[cfg(feature = "meta")]
+pub mod meta;
+#[cfg(feature = "nfa-thompson")]
+pub mod nfa;
+pub mod util;

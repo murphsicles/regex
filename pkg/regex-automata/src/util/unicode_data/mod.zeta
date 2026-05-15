@@ -1,0 +1,4 @@
+// Auto-converted from /tmp/df-regex-automata-0.4.14/regex-automata-0.4.14/src/util/unicode_data/mod.rs
+
+#[cfg(all(feature = "unicode-word-boundary", not(all(feature = "syntax", feature = "unicode-perl" )) ))]
+mod perl_word;

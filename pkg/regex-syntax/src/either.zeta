@@ -1,0 +1,11 @@
+// Auto-converted from /tmp/df-regex-syntax-0.8.10/regex-syntax-0.8.10/src/either.rs
+
+/// A simple binary sum type.
+/// 
+/// This is occasionally useful in an ad hoc fashion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Either<Left, Right> {
+ Left(Left),
+ Right(Right),
+}
+

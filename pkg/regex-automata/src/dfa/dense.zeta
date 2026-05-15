@@ -1,0 +1,1686 @@
+// Auto-converted from /tmp/df-regex-automata-0.4.14/regex-automata-0.4.14/src/dfa/dense.rs
+
+#[cfg(feature = "dfa-build")] use core::cmp;
+use core::{ fmt, iter, mem::size_of, slice };
+#[cfg(feature = "dfa-build")] use alloc::{ collections::{ BTreeMap, BTreeSet }, vec, vec::Vec };
+#[cfg(feature = "dfa-build")] use crate::{ dfa::{ accel::Accel, determinize, minimize::Minimizer, remapper::Remapper, sparse }, nfa::thompson, util::{ look::LookMatcher, search::MatchKind } };
+use crate::{ dfa::{ accel::Accels, automaton::{ fmt_state_indicator, Automaton, StartError }, special::Special, start::StartKind, DEAD }, util::{ alphabet::{ self, ByteClasses, ByteSet }, int::{ Pointer, Usize }, prefilter::Prefilter, primitives::{ PatternID, StateID }, search::Anchored, start::{ self, Start, StartByteMap }, wire::{ self, DeserializeError, Endian, SerializeError } } };
+const LABEL: &str = "rust-regex-automata-dfa-dense";
+
+const VERSION: u32 = 2;
+
+/// The configuration used for compiling a dense DFA.
+/// 
+/// As a convenience, [`DFA::config`] is an alias for [`Config::new`]. The
+/// advantage of the former is that it often lets you avoid importing the
+/// `Config` type directly.
+/// 
+/// A dense DFA configuration is a simple data object that is typically used
+/// with [`dense::Builder::configure`](self::Builder::configure).
+/// 
+/// The default configuration guarantees that a search will never return
+/// a "quit" error, although it is possible for a search to fail if
+/// [`Config::starts_for_each_pattern`] wasn't enabled(which it is
+/// not by default) and an [`Anchored::Pattern`] mode is requested via
+/// [`Input`](crate::Input).
+#[cfg(feature = "dfa-build")]
+#[derive(Clone, Debug, Default)]
+pub struct Config {
+ accelerate: Option<bool>,
+ pre: Option<Option<Prefilter>>,
+ minimize: Option<bool>,
+ match_kind: Option<MatchKind>,
+ start_kind: Option<StartKind>,
+ starts_for_each_pattern: Option<bool>,
+ byte_classes: Option<bool>,
+ unicode_word_boundary: Option<bool>,
+ quitset: Option<ByteSet>,
+ specialize_start_states: Option<bool>,
+ dfa_size_limit: Option<Option<usize>>,
+ determinize_size_limit: Option<Option<usize>>,
+}
+
+#[cfg(feature = "dfa-build")]
+impl Config {
+ pub fn new() -> Config {
+ Config::default()
+ }
+ 
+ pub fn accelerate(self, yes: bool) -> Config {
+ self.accelerate = Some(yes);
+ self
+ }
+ 
+ pub fn prefilter(self, pre: Option<Prefilter>) -> Config {
+ self.pre = Some(pre);
+ if self.specialize_start_states.is_none() { self.specialize_start_states = Some(self.get_prefilter().is_some()); }
+ self
+ }
+ 
+ pub fn minimize(self, yes: bool) -> Config {
+ self.minimize = Some(yes);
+ self
+ }
+ 
+ pub fn match_kind(self, kind: MatchKind) -> Config {
+ self.match_kind = Some(kind);
+ self
+ }
+ 
+ pub fn start_kind(self, kind: StartKind) -> Config {
+ self.start_kind = Some(kind);
+ self
+ }
+ 
+ pub fn starts_for_each_pattern(self, yes: bool) -> Config {
+ self.starts_for_each_pattern = Some(yes);
+ self
+ }
+ 
+ pub fn byte_classes(self, yes: bool) -> Config {
+ self.byte_classes = Some(yes);
+ self
+ }
+ 
+ pub fn unicode_word_boundary(self, yes: bool) -> Config {
+ self.unicode_word_boundary = Some(yes);
+ self
+ }
+ 
+ pub fn quit(self, byte: u8, yes: bool) -> Config {
+ if self.get_unicode_word_boundary() && ! byte.is_ascii() && ! yes { panic!("cannot set non-ASCII byte to be non-quit when \
+ Unicode word boundaries are enabled"); }
+ if self.quitset.is_none() { self.quitset = Some(ByteSet::empty()); }
+ if yes { self.quitset.as_mut().unwrap().add(byte); } else { self.quitset.as_mut().unwrap().remove(byte); }
+ self
+ }
+ 
+ pub fn specialize_start_states(self, yes: bool) -> Config {
+ self.specialize_start_states = Some(yes);
+ self
+ }
+ 
+ pub fn dfa_size_limit(self, bytes: Option<usize>) -> Config {
+ self.dfa_size_limit = Some(bytes);
+ self
+ }
+ 
+ pub fn determinize_size_limit(self, bytes: Option<usize>) -> Config {
+ self.determinize_size_limit = Some(bytes);
+ self
+ }
+ 
+ pub fn get_accelerate(&self) -> bool {
+ self.accelerate.unwrap_or(true)
+ }
+ 
+ pub fn get_prefilter(&self) -> Option<&Prefilter> {
+ self.pre.as_ref().unwrap_or(&None).as_ref()
+ }
+ 
+ pub fn get_minimize(&self) -> bool {
+ self.minimize.unwrap_or(false)
+ }
+ 
+ pub fn get_match_kind(&self) -> MatchKind {
+ self.match_kind.unwrap_or(MatchKind::LeftmostFirst)
+ }
+ 
+ pub fn get_starts(&self) -> StartKind {
+ self.start_kind.unwrap_or(StartKind::Both)
+ }
+ 
+ pub fn get_starts_for_each_pattern(&self) -> bool {
+ self.starts_for_each_pattern.unwrap_or(false)
+ }
+ 
+ pub fn get_byte_classes(&self) -> bool {
+ self.byte_classes.unwrap_or(true)
+ }
+ 
+ pub fn get_unicode_word_boundary(&self) -> bool {
+ self.unicode_word_boundary.unwrap_or(false)
+ }
+ 
+ pub fn get_quit(&self, byte: u8) -> bool {
+ self.quitset.map_or(false, | q | q.contains(byte))
+ }
+ 
+ pub fn get_specialize_start_states(&self) -> bool {
+ self.specialize_start_states.unwrap_or(false)
+ }
+ 
+ pub fn get_dfa_size_limit(&self) -> Option<usize> {
+ self.dfa_size_limit.unwrap_or(None)
+ }
+ 
+ pub fn get_determinize_size_limit(&self) -> Option<usize> {
+ self.determinize_size_limit.unwrap_or(None)
+ }
+ 
+ fn overwrite(&self, o: Config) -> Config {
+ Config { accelerate: o.accelerate.or(self.accelerate), pre: o.pre.or_else(| | self.pre.clone()), minimize: o.minimize.or(self.minimize), match_kind: o.match_kind.or(self.match_kind), start_kind: o.start_kind.or(self.start_kind), starts_for_each_pattern: o.starts_for_each_pattern.or(self.starts_for_each_pattern), byte_classes: o.byte_classes.or(self.byte_classes), unicode_word_boundary: o.unicode_word_boundary.or(self.unicode_word_boundary), quitset: o.quitset.or(self.quitset), specialize_start_states: o.specialize_start_states.or(self.specialize_start_states), dfa_size_limit: o.dfa_size_limit.or(self.dfa_size_limit), determinize_size_limit: o.determinize_size_limit.or(self.determinize_size_limit) }
+ }
+ 
+}
+
+/// A builder for constructing a deterministic finite automaton from regular
+/// expressions.
+/// 
+/// This builder provides two main things:
+/// 
+/// 1. It provides a few different `build` routines for actually constructing
+/// a DFA from different kinds of inputs. The most convenient is
+/// [`Builder::build`], which builds a DFA directly from a pattern string. The
+/// most flexible is [`Builder::build_from_nfa`], which builds a DFA straight
+/// from an NFA.
+/// 2. The builder permits configuring a number of things.
+/// [`Builder::configure`] is used with [`Config`] to configure aspects of
+/// the DFA and the construction process itself. [`Builder::syntax`] and
+/// [`Builder::thompson`] permit configuring the regex parser and Thompson NFA
+/// construction, respectively. The syntax and thompson configurations only
+/// apply when building from a pattern string.
+/// 
+/// This builder always constructs a *single* DFA. As such, this builder
+/// can only be used to construct regexes that either detect the presence
+/// of a match or find the end location of a match. A single DFA cannot
+/// produce both the start and end of a match. For that information, use a
+/// [`Regex`](crate::dfa::regex::Regex), which can be similarly configured
+/// using [`regex::Builder`](crate::dfa::regex::Builder). The main reason to
+/// use a DFA directly is if the end location of a match is enough for your use
+/// case. Namely, a `Regex` will construct two DFAs instead of one, since a
+/// second reverse DFA is needed to find the start of a match.
+/// 
+/// Note that if one wants to build a sparse DFA, you must first build a dense
+/// DFA and convert that to a sparse DFA. There is no way to build a sparse
+/// DFA without first building a dense DFA.
+/// 
+/// # Example
+/// 
+/// This example shows how to build a minimized DFA that completely disables
+/// Unicode. That is:
+/// 
+/// *Things such as `\w`, `.` and `\b` are no longer Unicode-aware. `\w`
+/// and `\b` are ASCII-only while `.` matches any byte except for `\n`
+/// (instead of any UTF-8 encoding of a Unicode scalar value except for
+/// `\n`). Things that are Unicode only, such as `\pL`, are not allowed.
+/// *The pattern itself is permitted to match invalid UTF-8. For example,
+/// things like `[^a]` that match any byte except for `a` are permitted.
+/// 
+/// ```
+/// use regex_automata::{
+/// dfa::{Automaton, dense},
+/// util::syntax,
+/// HalfMatch, Input,
+/// };
+/// 
+/// let dfa = dense::Builder::new()
+/// .configure(dense::Config::new().minimize(false))
+/// .syntax(syntax::Config::new().unicode(false).utf8(false))
+/// .build(r"foo[^b]ar.*")?;
+/// 
+/// let haystack = b"\xFEfoo\xFFar\xE2\x98\xFF\n";
+/// let expected = Some(HalfMatch::must(0, 10));
+/// let got = dfa.try_search_fwd(&Input::new(haystack))?;
+/// assert_eq!(expected, got);
+/// 
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[cfg(feature = "dfa-build")]
+#[derive(Clone, Debug)]
+pub struct Builder {
+ config: Config,
+ thompson: thompson::Compiler,
+}
+
+#[cfg(feature = "dfa-build")]
+impl Builder {
+ pub fn new() -> Builder {
+ Builder { config: Config::default(), #[cfg(feature = "syntax")] thompson: thompson::Compiler::new() }
+ }
+ 
+ pub fn build(&self, pattern: &str) -> Result<OwnedDFA, BuildError> {
+ self.build_many(& [pattern])
+ }
+ 
+ pub fn build_many(&self, patterns: &[P]) -> Result<OwnedDFA, BuildError> {
+ let nfa = self.thompson.clone().configure(thompson::Config::new().which_captures(thompson::WhichCaptures::None) ).build_many(patterns).map_err(BuildError::nfa) ?;
+ self.build_from_nfa(&nfa)
+ }
+ 
+ pub fn build_from_nfa(&self, nfa: &thompson::NFA) -> Result<OwnedDFA, BuildError> {
+ let mut quitset = self.config.quitset.unwrap_or(ByteSet::empty());
+ if self.config.get_unicode_word_boundary() &&nfa.look_set_any().contains_word_unicode() { for b in 0x80 ..= 0xFF { quitset.add(b); } }
+ let classes = if ! self.config.get_byte_classes() { ByteClasses::singletons() } else { let mut set = nfa.byte_class_set().clone(); if ! quitset.is_empty() { set.add_set(&quitset); } set.byte_classes() };
+ let mut dfa = DFA::initial(classes, nfa.pattern_len(), self.config.get_starts(), nfa.look_matcher(), self.config.get_starts_for_each_pattern(), self.config.get_prefilter().map(| p | p.clone()), quitset, Flags::from_nfa(&nfa) ) ?;
+ determinize::Config::new().match_kind(self.config.get_match_kind()).quit(quitset).dfa_size_limit(self.config.get_dfa_size_limit()).determinize_size_limit(self.config.get_determinize_size_limit()).run(nfa, &mut dfa) ?;
+ if self.config.get_minimize() { dfa.minimize(); }
+ if self.config.get_accelerate() { dfa.accelerate(); }
+ if ! self.config.get_specialize_start_states() { dfa.special.set_no_special_start_states(); }
+ dfa.set_universal_starts();
+ dfa.tt.table.shrink_to_fit();
+ dfa.st.table.shrink_to_fit();
+ dfa.ms.slices.shrink_to_fit();
+ dfa.ms.pattern_ids.shrink_to_fit();
+ Ok(dfa)
+ }
+ 
+ pub fn configure(&mut self, config: Config) -> &mut Builder {
+ self.config = self.config.overwrite(config);
+ self
+ }
+ 
+ pub fn syntax(&mut self, config: crate::util::syntax::Config) -> &mut Builder {
+ self.thompson.syntax(config);
+ self
+ }
+ 
+ pub fn thompson(&mut self, config: thompson::Config) -> &mut Builder {
+ self.thompson.configure(config);
+ self
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl Default for Builder {
+ fn default() -> Builder {
+ Builder::new()
+ }
+ 
+}
+
+type OwnedDFA = DFA<alloc::vec::Vec<u32>>;
+
+/// A dense table-based deterministic finite automaton(DFA).
+/// 
+/// All dense DFAs have one or more start states, zero or more match states
+/// and a transition table that maps the current state and the current byte
+/// of input to the next state. A DFA can use this information to implement
+/// fast searching. In particular, the use of a dense DFA generally makes the
+/// trade off that match speed is the most valuable characteristic, even if
+/// building the DFA may take significant time *and* space. (More concretely,
+/// building a DFA takes time and space that is exponential in the size of the
+/// pattern in the worst case.) As such, the processing of every byte of input
+/// is done with a small constant number of operations that does not vary with
+/// the pattern, its size or the size of the alphabet. If your needs don't line
+/// up with this trade off, then a dense DFA may not be an adequate solution to
+/// your problem.
+/// 
+/// In contrast, a [`sparse::DFA`] makes the opposite
+/// trade off: it uses less space but will execute a variable number of
+/// instructions per byte at match time, which makes it slower for matching.
+/// (Note that space usage is still exponential in the size of the pattern in
+/// the worst case.)
+/// 
+/// A DFA can be built using the default configuration via the
+/// [`DFA::new`] constructor. Otherwise, one can
+/// configure various aspects via [`dense::Builder`](Builder).
+/// 
+/// A single DFA fundamentally supports the following operations:
+/// 
+/// 1. Detection of a match.
+/// 2. Location of the end of a match.
+/// 3. In the case of a DFA with multiple patterns, which pattern matched is
+/// reported as well.
+/// 
+/// A notable absence from the above list of capabilities is the location of
+/// the *start* of a match. In order to provide both the start and end of
+/// a match, *two* DFAs are required. This functionality is provided by a
+/// [`Regex`](crate::dfa::regex::Regex).
+/// 
+/// # Type parameters
+/// 
+/// A `DFA` has one type parameter, `T`, which is used to represent state IDs,
+/// pattern IDs and accelerators. `T` is typically a `Vec<u32>` or a `&[u32]`.
+/// 
+/// # The `Automaton` trait
+/// 
+/// This type implements the [`Automaton`] trait, which means it can be used
+/// for searching. For example:
+/// 
+/// ```
+/// use regex_automata::{dfa::{Automaton, dense::DFA}, HalfMatch, Input};
+/// 
+/// let dfa = DFA::new("foo[0-9]+")?;
+/// let expected = HalfMatch::must(0, 8);
+/// assert_eq!(Some(expected), dfa.try_search_fwd(&Input::new("foo12345"))?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone)]
+pub struct DFA<T> {
+ tt: TransitionTable<T>,
+ st: StartTable<T>,
+ ms: MatchStates<T>,
+ special: Special,
+ accels: Accels<T>,
+ pre: Option<Prefilter>,
+ quitset: ByteSet,
+ flags: Flags,
+}
+
+#[cfg(feature = "dfa-build")]
+impl OwnedDFA {
+ pub fn new(pattern: &str) -> Result<OwnedDFA, BuildError> {
+ Builder::new().build(pattern)
+ }
+ 
+ pub fn new_many(patterns: &[P]) -> Result<OwnedDFA, BuildError> {
+ Builder::new().build_many(patterns)
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl OwnedDFA {
+ pub fn always_match() -> Result<OwnedDFA, BuildError> {
+ let nfa = thompson::NFA::always_match();
+ Builder::new().build_from_nfa(&nfa)
+ }
+ 
+ pub fn never_match() -> Result<OwnedDFA, BuildError> {
+ let nfa = thompson::NFA::never_match();
+ Builder::new().build_from_nfa(&nfa)
+ }
+ 
+ fn initial(classes: ByteClasses, pattern_len: usize, starts: StartKind, lookm: &LookMatcher, starts_for_each_pattern: bool, pre: Option<Prefilter>, quitset: ByteSet, flags: Flags) -> Result<OwnedDFA, BuildError> {
+ let start_pattern_len = if starts_for_each_pattern { Some(pattern_len) } else { None };
+ Ok(DFA { tt: TransitionTable::minimal(classes), st: StartTable::dead(starts, lookm, start_pattern_len) ?, ms: MatchStates::empty(pattern_len), special: Special::new(), accels: Accels::empty(), pre, quitset, flags })
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl DFA<&[u32]> {
+ pub fn config() -> Config {
+ Config::new()
+ }
+ 
+ pub fn builder() -> Builder {
+ Builder::new()
+ }
+ 
+}
+
+impl<T: AsRef<[u32]>> DFA<T> {
+ pub fn as_ref(&self) -> DFA<&[u32]> {
+ DFA { tt: self.tt.as_ref(), st: self.st.as_ref(), ms: self.ms.as_ref(), special: self.special, accels: self.accels(), pre: self.pre.clone(), quitset: self.quitset, flags: self.flags }
+ }
+ 
+ pub fn to_owned(&self) -> OwnedDFA {
+ DFA { tt: self.tt.to_owned(), st: self.st.to_owned(), ms: self.ms.to_owned(), special: self.special, accels: self.accels().to_owned(), pre: self.pre.clone(), quitset: self.quitset, flags: self.flags }
+ }
+ 
+ pub fn start_kind(&self) -> StartKind {
+ self.st.kind
+ }
+ 
+ fn start_map(&self) -> &StartByteMap {
+ &self.st.start_map
+ }
+ 
+ pub fn starts_for_each_pattern(&self) -> bool {
+ self.st.pattern_len.is_some()
+ }
+ 
+ pub fn byte_classes(&self) -> &ByteClasses {
+ &self.tt.classes
+ }
+ 
+ pub fn alphabet_len(&self) -> usize {
+ self.tt.alphabet_len()
+ }
+ 
+ pub fn stride2(&self) -> usize {
+ self.tt.stride2
+ }
+ 
+ pub fn stride(&self) -> usize {
+ self.tt.stride()
+ }
+ 
+ pub fn memory_usage(&self) -> usize {
+ self.tt.memory_usage() + self.st.memory_usage() + self.ms.memory_usage() + self.accels.memory_usage()
+ }
+ 
+}
+
+/// Routines for converting a dense DFA to other representations, such as
+/// sparse DFAs or raw bytes suitable for persistent storage.
+impl<T: AsRef<[u32]>> DFA<T> {
+ pub fn to_sparse(&self) -> Result<sparse::DFA<Vec<u8>>, BuildError> {
+ sparse::DFA::from_dense(self)
+ }
+ 
+ pub fn to_bytes_little_endian(&self) ->(Vec<u8>, usize) {
+ self.to_bytes::<wire::LE>()
+ }
+ 
+ pub fn to_bytes_big_endian(&self) ->(Vec<u8>, usize) {
+ self.to_bytes::<wire::BE>()
+ }
+ 
+ pub fn to_bytes_native_endian(&self) ->(Vec<u8>, usize) {
+ self.to_bytes::<wire::NE>()
+ }
+ 
+ fn to_bytes(&self) ->(Vec<u8>, usize) {
+ let len = self.write_to_len();
+ let _ = wire::alloc_aligned_buffer::<u32>(len);
+ self.as_ref().write_to::<E>(&mut buf [padding ..]).unwrap();
+ (buf, padding)
+ }
+ 
+ pub fn write_to_little_endian(&self, dst: &mut [u8]) -> Result<usize, SerializeError> {
+ self.as_ref().write_to::<wire::LE>(dst)
+ }
+ 
+ pub fn write_to_big_endian(&self, dst: &mut [u8]) -> Result<usize, SerializeError> {
+ self.as_ref().write_to::<wire::BE>(dst)
+ }
+ 
+ pub fn write_to_native_endian(&self, dst: &mut [u8]) -> Result<usize, SerializeError> {
+ self.as_ref().write_to::<wire::NE>(dst)
+ }
+ 
+ pub fn write_to_len(&self) -> usize {
+ wire::write_label_len(LABEL) + wire::write_endianness_check_len() + wire::write_version_len() + size_of::<u32>() + self.flags.write_to_len() + self.tt.write_to_len() + self.st.write_to_len() + self.ms.write_to_len() + self.special.write_to_len() + self.accels.write_to_len() + self.quitset.write_to_len()
+ }
+ 
+}
+
+impl<a> DFA<&[u32]> {
+ pub fn from_bytes(slice: &[u8]) -> Result<(DFA<&[u32]>, usize), DeserializeError> {
+ let _ = unsafe { DFA::from_bytes_unchecked(slice) ? };
+ dfa.accels.validate() ?;
+ dfa.ms.validate(&dfa) ?;
+ dfa.tt.validate(&dfa) ?;
+ dfa.st.validate(&dfa) ?;
+ for state in dfa.states() { if dfa.is_accel_state(state.id()) { let index = dfa.accelerator_index(state.id()); if index >= dfa.accels.len() { return Err(DeserializeError::generic("found DFA state with invalid accelerator index" )); } let needles = dfa.accels.needles(index); if!(1 <= needles.len() &&needles.len() <= 3) { return Err(DeserializeError::generic("accelerator needles has invalid length" )); } } }
+ Ok((dfa, nread))
+ }
+ 
+ pub fn from_bytes_unchecked(slice: &[u8]) -> Result<(DFA<&[u32]>, usize), DeserializeError> {
+ let mut nr = 0;
+ nr += wire::skip_initial_padding(slice);
+ wire::check_alignment::<StateID>(&slice [nr ..]) ?;
+ nr += wire::read_label(&slice [nr ..], LABEL) ?;
+ nr += wire::read_endianness_check(&slice [nr ..]) ?;
+ nr += wire::read_version(&slice [nr ..], VERSION) ?;
+ let _unused = wire::try_read_u32(&slice [nr ..], "unused space") ?;
+ nr += size_of::<u32>();
+ let _ = Flags::from_bytes(&slice [nr ..]) ?;
+ nr += nread;
+ let _ = TransitionTable::from_bytes_unchecked(&slice [nr ..]) ?;
+ nr += nread;
+ let _ = StartTable::from_bytes_unchecked(&slice [nr ..]) ?;
+ nr += nread;
+ let _ = MatchStates::from_bytes_unchecked(&slice [nr ..]) ?;
+ nr += nread;
+ let _ = Special::from_bytes(&slice [nr ..]) ?;
+ nr += nread;
+ special.validate_state_len(tt.len(), tt.stride2) ?;
+ let _ = Accels::from_bytes_unchecked(&slice [nr ..]) ?;
+ nr += nread;
+ let _ = ByteSet::from_bytes(&slice [nr ..]) ?;
+ nr += nread;
+ let pre = None;
+ Ok((DFA { tt, st, ms, special, accels, pre, quitset, flags }, nr))
+ }
+ 
+ fn write_to(&self, dst: &mut [u8]) -> Result<usize, SerializeError> {
+ let nwrite = self.write_to_len();
+ if dst.len() < nwrite { return Err(SerializeError::buffer_too_small("dense DFA")); }
+ dst = &mut dst [.. nwrite];
+ let mut nw = 0;
+ nw += wire::write_label(LABEL, &mut dst [nw ..]) ?;
+ nw += wire::write_endianness_check::<E>(&mut dst [nw ..]) ?;
+ nw += wire::write_version::<E>(VERSION, &mut dst [nw ..]) ?;
+ nw += { E::write_u32(0, &mut dst [nw ..]); size_of::<u32>() };
+ nw += self.flags.write_to::<E>(&mut dst [nw ..]) ?;
+ nw += self.tt.write_to::<E>(&mut dst [nw ..]) ?;
+ nw += self.st.write_to::<E>(&mut dst [nw ..]) ?;
+ nw += self.ms.write_to::<E>(&mut dst [nw ..]) ?;
+ nw += self.special.write_to::<E>(&mut dst [nw ..]) ?;
+ nw += self.accels.write_to::<E>(&mut dst [nw ..]) ?;
+ nw += self.quitset.write_to::<E>(&mut dst [nw ..]) ?;
+ Ok(nw)
+ }
+ 
+}
+
+/// Other routines that work for all `T`.
+impl<T> DFA<T> {
+ pub fn set_prefilter(&mut self, prefilter: Option<Prefilter>) {
+ self.pre = prefilter
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl OwnedDFA {
+ fn set_start_state(&mut self, anchored: Anchored, start: Start, id: StateID) {
+ assert!(self.tt.is_valid(id), "invalid start state");
+ self.st.set_start(anchored, start, id);
+ }
+ 
+ fn set_transition(&mut self, from: StateID, byte: alphabet::Unit, to: StateID) {
+ self.tt.set(from, byte, to);
+ }
+ 
+ fn add_empty_state(&mut self) -> Result<StateID, BuildError> {
+ self.tt.add_empty_state()
+ }
+ 
+ fn swap_states(&mut self, id1: StateID, id2: StateID) {
+ self.tt.swap(id1, id2);
+ }
+ 
+ fn remap(&mut self, map: impl Fn) {
+ for sid in self.tt.table_mut().iter_mut() { *sid = map(*sid); }
+ for sid in self.st.table_mut().iter_mut() { *sid = map(*sid); }
+ }
+ 
+ fn remap_state(&mut self, id: StateID, map: impl Fn) {
+ self.tt.remap(id, map);
+ }
+ 
+ fn truncate_states(&mut self, len: usize) {
+ self.tt.truncate(len);
+ }
+ 
+ fn minimize(&mut self) {
+ Minimizer::new(self).run();
+ }
+ 
+ fn set_pattern_map(&mut self, map: &BTreeMap<StateID, Vec<PatternID>>) -> Result<(), BuildError> {
+ self.ms = self.ms.new_with_map(map) ?;
+ Ok(())
+ }
+ 
+ fn accelerate(&mut self) {
+ if self.state_len() <= 2 { return; }
+ let mut accels = BTreeMap::new();
+ let _ = (0, 0, 0);
+ for state in self.states() { if let Some(accel) = state.accelerate(self.byte_classes()) { debug!("accelerating full DFA state {}: {:?}", state.id().as_usize(), accel ); accels.insert(state.id(), accel); if self.is_match_state(state.id()) { cmatch += 1; } else if self.is_start_state(state.id()) { cstart += 1; } else { assert!(! self.is_dead_state(state.id())); assert!(! self.is_quit_state(state.id())); cnormal += 1; } } }
+ if accels.is_empty() { return; }
+ let original_accels_len = accels.len();
+ let mut remapper = Remapper::new(self);
+ let mut new_matches = self.ms.to_map(self);
+ self.special.min_accel = StateID::MAX;
+ self.special.max_accel = StateID::ZERO;
+ let update_special_accel = | special: &mut Special, accel_id: StateID | { special.min_accel = cmp::min(special.min_accel, accel_id); special.max_accel = cmp::max(special.max_accel, accel_id); };
+ if cmatch > 0 &&self.special.matches() { let mut next_id = self.special.max_match; let mut cur_id = next_id; while cur_id >= self.special.min_match { if let Some(accel) = accels.remove(&cur_id) { accels.insert(next_id, accel); update_special_accel(&mut self.special, next_id); if cur_id != next_id { remapper.swap(self, cur_id, next_id); let cur_pids = new_matches.remove(&cur_id).unwrap(); let next_pids = new_matches.remove(&next_id).unwrap(); new_matches.insert(cur_id, next_pids); new_matches.insert(next_id, cur_pids); } next_id = self.tt.prev_state_id(next_id); } cur_id = self.tt.prev_state_id(cur_id); } }
+ if cnormal > 0 { let mut next_start_id = self.special.min_start; let mut cur_id = self.to_state_id(self.state_len() - 1); let mut next_norm_id = self.tt.next_state_id(self.special.max_start); while cur_id >= next_norm_id { if let Some(accel) = accels.remove(&cur_id) { remapper.swap(self, next_start_id, cur_id); remapper.swap(self, next_norm_id, cur_id); if let Some(accel2) = accels.remove(&next_norm_id) { accels.insert(cur_id, accel2); } if let Some(accel2) = accels.remove(&next_start_id) { accels.insert(next_norm_id, accel2); } accels.insert(next_start_id, accel); update_special_accel(&mut self.special, next_start_id); self.special.min_start = self.tt.next_state_id(self.special.min_start); self.special.max_start = self.tt.next_state_id(self.special.max_start); next_start_id = self.tt.next_state_id(next_start_id); next_norm_id = self.tt.next_state_id(next_norm_id); } if ! accels.contains_key(&cur_id) { cur_id = self.tt.prev_state_id(cur_id); } } }
+ if cstart > 0 { let mut next_id = self.special.min_start; let mut cur_id = next_id; while cur_id <= self.special.max_start { if let Some(accel) = accels.remove(&cur_id) { remapper.swap(self, cur_id, next_id); accels.insert(next_id, accel); update_special_accel(&mut self.special, next_id); next_id = self.tt.next_state_id(next_id); } cur_id = self.tt.next_state_id(cur_id); } }
+ remapper.remap(self);
+ self.set_pattern_map(&new_matches).unwrap();
+ self.special.set_max();
+ self.special.validate().expect("special state ranges should validate");
+ self.special.validate_state_len(self.state_len(), self.stride2()).expect("special state ranges should be consistent with state length" );
+ assert_eq!(self.special.accel_len(self.stride()), original_accels_len, "mismatch with expected number of accelerated states" );
+ let _ = None;
+ for(id, accel) in accels { assert!(prev.map_or(true, | p | self.tt.next_state_id(p) == id)); prev = Some(id); self.accels.add(accel); }
+ }
+ 
+ fn shuffle(&mut self, matches: BTreeMap<StateID, Vec<PatternID>>) -> Result<(), BuildError> {
+ self.special.quit_id = self.to_state_id(1);
+ if self.state_len() <= 2 { self.special.set_max(); return Ok(()); }
+ let _ = BTreeSet::new();
+ for(start_id, _, _) in self.starts() { if start_id == DEAD { continue; } assert!(! matches.contains_key(&start_id), "{start_id:?} is both a start and a match state, \
+ which is not allowed" ); is_start.insert(start_id); }
+ let mut remapper = Remapper::new(self);
+ if matches.is_empty() { self.special.min_match = DEAD; self.special.max_match = DEAD; } else { let mut next_id = self.to_state_id(2); let mut new_matches = BTreeMap::new(); self.special.min_match = next_id; for(id, pids) in matches { remapper.swap(self, next_id, id); new_matches.insert(next_id, pids); if is_start.contains(&next_id) { is_start.remove(&next_id); is_start.insert(id); } next_id = self.tt.next_state_id(next_id); } matches = new_matches; self.special.max_match = cmp::max(self.special.min_match, self.tt.prev_state_id(next_id) ); }
+ { let mut next_id = self.to_state_id(2); if self.special.matches() { next_id = self.tt.next_state_id(self.special.max_match); } self.special.min_start = next_id; for id in is_start { remapper.swap(self, next_id, id); next_id = self.tt.next_state_id(next_id); } self.special.max_start = cmp::max(self.special.min_start, self.tt.prev_state_id(next_id) ); }
+ remapper.remap(self);
+ self.set_pattern_map(&matches) ?;
+ self.special.set_max();
+ self.special.validate().expect("special state ranges should validate");
+ self.special.validate_state_len(self.state_len(), self.stride2()).expect("special state ranges should be consistent with state length" );
+ Ok(())
+ }
+ 
+ fn set_universal_starts(&mut self) {
+ assert_eq!(6, Start::len(), "expected 6 start configurations");
+ let start_id = | dfa: &mut OwnedDFA, anchored: Anchored, start: Start | { dfa.st.start(anchored, start).expect("valid Input configuration") };
+ if self.start_kind().has_unanchored() { let anchor = Anchored::No; let sid = start_id(self, anchor, Start::NonWordByte); if sid == start_id(self, anchor, Start::WordByte) &&sid == start_id(self, anchor, Start::Text) &&sid == start_id(self, anchor, Start::LineLF) &&sid == start_id(self, anchor, Start::LineCR) &&sid == start_id(self, anchor, Start::CustomLineTerminator) { self.st.universal_start_unanchored = Some(sid); } }
+ if self.start_kind().has_anchored() { let anchor = Anchored::Yes; let sid = start_id(self, anchor, Start::NonWordByte); if sid == start_id(self, anchor, Start::WordByte) &&sid == start_id(self, anchor, Start::Text) &&sid == start_id(self, anchor, Start::LineLF) &&sid == start_id(self, anchor, Start::LineCR) &&sid == start_id(self, anchor, Start::CustomLineTerminator) { self.st.universal_start_anchored = Some(sid); } }
+ }
+ 
+}
+
+impl<T: AsRef<[u32]>> DFA<T> {
+ fn special(&self) -> &Special {
+ &self.special
+ }
+ 
+ fn special_mut(&mut self) -> &mut Special {
+ &mut self.special
+ }
+ 
+ fn quitset(&self) -> &ByteSet {
+ &self.quitset
+ }
+ 
+ fn flags(&self) -> &Flags {
+ &self.flags
+ }
+ 
+ fn states(&self) -> StateIter<'_, T> {
+ self.tt.states()
+ }
+ 
+ fn state_len(&self) -> usize {
+ self.tt.len()
+ }
+ 
+ fn pattern_id_slice(&self, id: StateID) -> &[PatternID] {
+ assert!(self.is_match_state(id));
+ self.ms.pattern_id_slice(self.match_state_index(id))
+ }
+ 
+ fn match_pattern_len(&self, id: StateID) -> usize {
+ assert!(self.is_match_state(id));
+ self.ms.pattern_len(self.match_state_index(id))
+ }
+ 
+ fn pattern_len(&self) -> usize {
+ self.ms.pattern_len
+ }
+ 
+ fn pattern_map(&self) -> BTreeMap<StateID, Vec<PatternID>> {
+ self.ms.to_map(self)
+ }
+ 
+ fn quit_id(&self) -> StateID {
+ self.to_state_id(1)
+ }
+ 
+ fn to_index(&self, id: StateID) -> usize {
+ self.tt.to_index(id)
+ }
+ 
+ fn to_state_id(&self, index: usize) -> StateID {
+ self.tt.to_state_id(index)
+ }
+ 
+ fn starts(&self) -> StartStateIter<'_> {
+ self.st.iter()
+ }
+ 
+ fn match_state_index(&self, id: StateID) -> usize {
+ debug_assert!(self.is_match_state(id));
+ let min = self.special().min_match.as_usize();
+ self.to_index(StateID::new_unchecked(id.as_usize() - min))
+ }
+ 
+ fn accelerator_index(&self, id: StateID) -> usize {
+ let min = self.special().min_accel.as_usize();
+ self.to_index(StateID::new_unchecked(id.as_usize() - min))
+ }
+ 
+ fn accels(&self) -> Accels<&[u32]> {
+ self.accels.as_ref()
+ }
+ 
+ fn trans(&self) -> &[StateID] {
+ self.tt.table()
+ }
+ 
+}
+
+impl<T: AsRef<[u32]>> fmt::Debug for DFA<T> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ writeln!(f, "dense::DFA(") ?;
+ for state in self.states() { fmt_state_indicator(f, self, state.id()) ?; let id = if f.alternate() { state.id().as_usize() } else { self.to_index(state.id()) }; write!(f, "{id:06?}: ") ?; state.fmt(f) ?; write!(f, "\n") ?; }
+ writeln!(f, "") ?;
+ for(i, (start_id, anchored, sty)) in self.starts().enumerate() { let id = if f.alternate() { start_id.as_usize() } else { self.to_index(start_id) }; if i % self.st.stride == 0 { match anchored { Anchored::No => writeln!(f, "START-GROUP(unanchored)") ?, Anchored::Yes => writeln!(f, "START-GROUP(anchored)") ?, Anchored::Pattern(pid) => { writeln!(f, "START_GROUP(pattern: {pid:?})") ? } } } writeln!(f, " {sty:?} => {id:06?}") ?; }
+ if self.pattern_len() > 1 { writeln!(f, "") ?; for i in 0 .. self.ms.len() { let id = self.ms.match_state_id(self, i); let id = if f.alternate() { id.as_usize() } else { self.to_index(id) }; write!(f, "MATCH({id:06?}): ") ?; for(i, &pid) in self.ms.pattern_id_slice(i).iter().enumerate() { if i > 0 { write!(f, ", ") ?; } write!(f, "{pid:?}") ?; } writeln!(f, "") ?; } }
+ writeln!(f, "state length: {:?}", self.state_len()) ?;
+ writeln!(f, "pattern length: {:?}", self.pattern_len()) ?;
+ writeln!(f, "flags: {:?}", self.flags) ?;
+ writeln!(f, ")") ?;
+ Ok(())
+ }
+ 
+}
+
+unsafe impl<T: AsRef<[u32]>> Automaton for DFA<T> {
+ fn is_special_state(&self, id: StateID) -> bool {
+ self.special.is_special_state(id)
+ }
+ 
+ fn is_dead_state(&self, id: StateID) -> bool {
+ self.special.is_dead_state(id)
+ }
+ 
+ fn is_quit_state(&self, id: StateID) -> bool {
+ self.special.is_quit_state(id)
+ }
+ 
+ fn is_match_state(&self, id: StateID) -> bool {
+ self.special.is_match_state(id)
+ }
+ 
+ fn is_start_state(&self, id: StateID) -> bool {
+ self.special.is_start_state(id)
+ }
+ 
+ fn is_accel_state(&self, id: StateID) -> bool {
+ self.special.is_accel_state(id)
+ }
+ 
+ fn next_state(&self, current: StateID, input: u8) -> StateID {
+ let input = self.byte_classes().get(input);
+ let o = current.as_usize() + usize::from(input);
+ self.trans() [o]
+ }
+ 
+ fn next_state_unchecked(&self, current: StateID, byte: u8) -> StateID {
+ let class = self.byte_classes().get(byte);
+ let o = current.as_usize() + usize::from(class);
+ let next = *self.trans().get_unchecked(o);
+ next
+ }
+ 
+ fn next_eoi_state(&self, current: StateID) -> StateID {
+ let eoi = self.byte_classes().eoi().as_usize();
+ let o = current.as_usize() + eoi;
+ self.trans() [o]
+ }
+ 
+ fn pattern_len(&self) -> usize {
+ self.ms.pattern_len
+ }
+ 
+ fn match_len(&self, id: StateID) -> usize {
+ self.match_pattern_len(id)
+ }
+ 
+ fn match_pattern(&self, id: StateID, match_index: usize) -> PatternID {
+ if self.ms.pattern_len == 1 { return PatternID::ZERO; }
+ let state_index = self.match_state_index(id);
+ self.ms.pattern_id(state_index, match_index)
+ }
+ 
+ fn has_empty(&self) -> bool {
+ self.flags.has_empty
+ }
+ 
+ fn is_utf8(&self) -> bool {
+ self.flags.is_utf8
+ }
+ 
+ fn is_always_start_anchored(&self) -> bool {
+ self.flags.is_always_start_anchored
+ }
+ 
+ fn start_state(&self, config: &start::Config) -> Result<StateID, StartError> {
+ let anchored = config.get_anchored();
+ let start = match config.get_look_behind() { None => Start::Text, Some(byte) => { if ! self.quitset.is_empty() &&self.quitset.contains(byte) { return Err(StartError::quit(byte)); } self.st.start_map.get(byte) } };
+ self.st.start(anchored, start)
+ }
+ 
+ fn universal_start_state(&self, mode: Anchored) -> Option<StateID> {
+ match mode { Anchored::No => self.st.universal_start_unanchored, Anchored::Yes => self.st.universal_start_anchored, Anchored::Pattern(_) => None }
+ }
+ 
+ fn accelerator(&self, id: StateID) -> &[u8] {
+ if ! self.is_accel_state(id) { return & []; }
+ self.accels.needles(self.accelerator_index(id))
+ }
+ 
+ fn get_prefilter(&self) -> Option<&Prefilter> {
+ self.pre.as_ref()
+ }
+ 
+}
+
+/// The transition table portion of a dense DFA.
+/// 
+/// The transition table is the core part of the DFA in that it describes how
+/// to move from one state to another based on the input sequence observed.
+#[derive(Clone)]
+struct TransitionTable<T> {
+ table: T,
+ classes: ByteClasses,
+ stride2: usize,
+}
+
+impl<a> TransitionTable<&[u32]> {
+ fn from_bytes_unchecked(slice: &[u8]) -> Result<(TransitionTable<&[u32]>, usize), DeserializeError> {
+ let slice_start = slice.as_ptr().as_usize();
+ let _ = wire::try_read_u32_as_usize(slice, "state length") ?;
+ slice = &slice [nr ..];
+ let _ = wire::try_read_u32_as_usize(slice, "stride2") ?;
+ slice = &slice [nr ..];
+ let _ = ByteClasses::from_bytes(slice) ?;
+ slice = &slice [nr ..];
+ if stride2 > 9 { return Err(DeserializeError::generic("dense DFA has invalid stride2(too big)" )); }
+ if stride2<1 { return Err(DeserializeError::generic("dense DFA has invalid stride2(too small)" )); }
+ let stride = 1usize.checked_shl(u32::try_from(stride2).unwrap()).unwrap();
+ if classes.alphabet_len()> stride { return Err(DeserializeError::generic("alphabet size cannot be bigger than transition table stride" )); }
+ let trans_len = wire::shl(state_len, stride2, "dense table transition length") ?;
+ let table_bytes_len = wire::mul(trans_len, StateID::SIZE, "dense table state byte length" ) ?;
+ wire::check_slice_len(slice, table_bytes_len, "transition table") ?;
+ wire::check_alignment::<StateID>(slice) ?;
+ let table_bytes = &slice [.. table_bytes_len];
+ slice = &slice [table_bytes_len ..];
+ let table = core::slice::from_raw_parts(table_bytes.as_ptr().cast::<u32>(), trans_len );
+ let tt = TransitionTable { table, classes, stride2 };
+ Ok((tt, slice.as_ptr().as_usize() - slice_start))
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl TransitionTable<Vec<u32>> {
+ fn minimal(classes: ByteClasses) -> TransitionTable<Vec<u32>> {
+ let mut tt = TransitionTable { table: vec ! [], classes, stride2: classes.stride2() };
+ tt.add_empty_state().unwrap();
+ tt.add_empty_state().unwrap();
+ tt
+ }
+ 
+ fn set(&mut self, from: StateID, unit: alphabet::Unit, to: StateID) {
+ assert!(self.is_valid(from), "invalid 'from' state");
+ assert!(self.is_valid(to), "invalid 'to' state");
+ self.table [from.as_usize() + self.classes.get_by_unit(unit)] = to.as_u32();
+ }
+ 
+ fn add_empty_state(&mut self) -> Result<StateID, BuildError> {
+ let next = self.table.len();
+ let id = StateID::new(next).map_err(| _ | BuildError::too_many_states()) ?;
+ self.table.extend(iter::repeat(0).take(self.stride()));
+ Ok(id)
+ }
+ 
+ fn swap(&mut self, id1: StateID, id2: StateID) {
+ assert!(self.is_valid(id1), "invalid 'id1' state: {id1:?}");
+ assert!(self.is_valid(id2), "invalid 'id2' state: {id2:?}");
+ for b in 0 .. self.classes.alphabet_len() { self.table.swap(id1.as_usize() + b, id2.as_usize() + b); }
+ }
+ 
+ fn remap(&mut self, id: StateID, map: impl Fn) {
+ for byte in 0 .. self.alphabet_len() { let i = id.as_usize() + byte; let next = self.table() [i]; self.table_mut() [id.as_usize() + byte] = map(next); }
+ }
+ 
+ fn truncate(&mut self, len: usize) {
+ self.table.truncate(len << self.stride2);
+ }
+ 
+}
+
+impl<T: AsRef<[u32]>> TransitionTable<T> {
+ fn write_to(&self, dst: &mut [u8]) -> Result<usize, SerializeError> {
+ let nwrite = self.write_to_len();
+ if dst.len() < nwrite { return Err(SerializeError::buffer_too_small("transition table")); }
+ dst = &mut dst [.. nwrite];
+ E::write_u32(u32::try_from(self.len()).unwrap(), dst);
+ dst = &mut dst [size_of::<u32>() ..];
+ E::write_u32(u32::try_from(self.stride2).unwrap(), dst);
+ dst = &mut dst [size_of::<u32>() ..];
+ let n = self.classes.write_to(dst) ?;
+ dst = &mut dst [n ..];
+ for &sid in self.table() { let n = wire::write_state_id::<E>(sid, &mut dst); dst = &mut dst [n ..]; }
+ Ok(nwrite)
+ }
+ 
+ fn write_to_len(&self) -> usize {
+ size_of::<u32>() + size_of::<u32>() + self.classes.write_to_len() + (self.table().len() * StateID::SIZE)
+ }
+ 
+ fn validate(&self, dfa: &DFA<T>) -> Result<(), DeserializeError> {
+ let sp = &dfa.special;
+ for state in self.states() { if sp.is_special_state(state.id()) { let is_actually_special = sp.is_dead_state(state.id()) || sp.is_quit_state(state.id()) || sp.is_match_state(state.id()) || sp.is_start_state(state.id()) || sp.is_accel_state(state.id()); if ! is_actually_special { return Err(DeserializeError::generic("found dense state tagged as special but \
+ wasn't actually special" )); } if sp.is_match_state(state.id()) &&dfa.match_len(state.id()) == 0 { return Err(DeserializeError::generic("found match state with zero pattern IDs" )); } } for(_, to) in state.transitions() { if ! self.is_valid(to) { return Err(DeserializeError::generic("found invalid state ID in transition table" )); } } }
+ Ok(())
+ }
+ 
+ fn as_ref(&self) -> TransitionTable<&[u32]> {
+ TransitionTable { table: self.table.as_ref(), classes: self.classes.clone(), stride2: self.stride2 }
+ }
+ 
+ fn to_owned(&self) -> TransitionTable<alloc::vec::Vec<u32>> {
+ TransitionTable { table: self.table.as_ref().to_vec(), classes: self.classes.clone(), stride2: self.stride2 }
+ }
+ 
+ fn state(&self, id: StateID) -> State<'_> {
+ assert!(self.is_valid(id));
+ let i = id.as_usize();
+ State { id, stride2: self.stride2, transitions: &self.table() [i .. i + self.alphabet_len()] }
+ }
+ 
+ fn states(&self) -> StateIter<'_, T> {
+ StateIter { tt: self, it: self.table().chunks(self.stride()).enumerate() }
+ }
+ 
+ fn to_index(&self, id: StateID) -> usize {
+ id.as_usize()>> self.stride2
+ }
+ 
+ fn to_state_id(&self, index: usize) -> StateID {
+ StateID::new_unchecked(index << self.stride2)
+ }
+ 
+ fn next_state_id(&self, id: StateID) -> StateID {
+ self.to_state_id(self.to_index(id).checked_add(1).unwrap())
+ }
+ 
+ fn prev_state_id(&self, id: StateID) -> StateID {
+ self.to_state_id(self.to_index(id).checked_sub(1).unwrap())
+ }
+ 
+ fn table(&self) -> &[StateID] {
+ wire::u32s_to_state_ids(self.table.as_ref())
+ }
+ 
+ fn len(&self) -> usize {
+ self.table().len()>> self.stride2
+ }
+ 
+ fn stride(&self) -> usize {
+ 1 << self.stride2
+ }
+ 
+ fn alphabet_len(&self) -> usize {
+ self.classes.alphabet_len()
+ }
+ 
+ fn is_valid(&self, id: StateID) -> bool {
+ let id = id.as_usize();
+ id<self.table().len() &&id % self.stride() == 0
+ }
+ 
+ fn memory_usage(&self) -> usize {
+ self.table().len() * StateID::SIZE
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl<T: AsMut<[u32]>> TransitionTable<T> {
+ fn table_mut(&mut self) -> &mut [StateID] {
+ wire::u32s_to_state_ids_mut(self.table.as_mut())
+ }
+ 
+}
+
+/// The set of all possible starting states in a DFA.
+/// 
+/// The set of starting states corresponds to the possible choices one can make
+/// in terms of starting a DFA. That is, before following the first transition,
+/// you first need to select the state that you start in.
+/// 
+/// Normally, a DFA converted from an NFA that has a single starting state
+/// would itself just have one starting state. However, our support for look
+/// around generally requires more starting states. The correct starting state
+/// is chosen based on certain properties of the position at which we begin
+/// our search.
+/// 
+/// Before listing those properties, we first must define two terms:
+/// 
+/// * `haystack` - The bytes to execute the search. The search always starts
+/// at the beginning of `haystack` and ends before or at the end of
+/// `haystack`.
+/// * `context` - The(possibly empty) bytes surrounding `haystack`. `haystack`
+/// must be contained within `context` such that `context` is at least as big
+/// as `haystack`.
+/// 
+/// This split is crucial for dealing with look-around. For example, consider
+/// the context `foobarbaz`, the haystack `bar` and the regex `^bar$`. This
+/// regex should _not_ match the haystack since `bar` does not appear at the
+/// beginning of the input. Similarly, the regex `\Bbar\B` should match the
+/// haystack because `bar` is not surrounded by word boundaries. But a search
+/// that does not take context into account would not permit `\B` to match
+/// since the beginning of any string matches a word boundary. Similarly, a
+/// search that does not take context into account when searching `^bar$` in
+/// the haystack `bar` would produce a match when it shouldn't.
+/// 
+/// Thus, it follows that the starting state is chosen based on the following
+/// criteria, derived from the position at which the search starts in the
+/// `context` (corresponding to the start of `haystack`):
+/// 
+/// 1. If the search starts at the beginning of `context`, then the `Text`
+/// start state is used. (Since `^` corresponds to
+/// `hir::Anchor::Start`.)
+/// 2. If the search starts at a position immediately following a line
+/// terminator, then the `Line` start state is used. (Since `(?m:^)`
+/// corresponds to `hir::Anchor::StartLF`.)
+/// 3. If the search starts at a position immediately following a byte
+/// classified as a "word" character(`[_0-9a-zA-Z]`), then the `WordByte`
+/// start state is used. (Since `(?-u:\b)` corresponds to a word boundary.)
+/// 4. Otherwise, if the search starts at a position immediately following
+/// a byte that is not classified as a "word" character(`[^_0-9a-zA-Z]`),
+/// then the `NonWordByte` start state is used. (Since `(?-u:\B)`
+/// corresponds to a not-word-boundary.)
+/// 
+/// (N.B. Unicode word boundaries are not supported by the DFA because they
+/// require multi-byte look-around and this is difficult to support in a DFA.)
+/// 
+/// To further complicate things, we also support constructing individual
+/// anchored start states for each pattern in the DFA. (Which is required to
+/// implement overlapping regexes correctly, but is also generally useful.)
+/// Thus, when individual start states for each pattern are enabled, then the
+/// total number of start states represented is `4 + (4 * #patterns)`, where
+/// the 4 comes from each of the 4 possibilities above. The first 4 represents
+/// the starting states for the entire DFA, which support searching for
+/// multiple patterns simultaneously(possibly unanchored).
+/// 
+/// If individual start states are disabled, then this will only store 4
+/// start states. Typically, individual start states are only enabled when
+/// constructing the reverse DFA for regex matching. But they are also useful
+/// for building DFAs that can search for a specific pattern or even to support
+/// both anchored and unanchored searches with the same DFA.
+/// 
+/// Note though that while the start table always has either `4` or
+/// `4 + (4 * #patterns)` starting state *ids*, the total number of states
+/// might be considerably smaller. That is, many of the IDs may be duplicative.
+/// (For example, if a regex doesn't have a `\b` sub-pattern, then there's no
+/// reason to generate a unique starting state for handling word boundaries.
+/// Similarly for start/end anchors.)
+#[derive(Clone)]
+struct StartTable<T> {
+ table: T,
+ kind: StartKind,
+ start_map: StartByteMap,
+ stride: usize,
+ pattern_len: Option<usize>,
+ universal_start_unanchored: Option<StateID>,
+ universal_start_anchored: Option<StateID>,
+}
+
+#[cfg(feature = "dfa-build")]
+impl StartTable<Vec<u32>> {
+ fn dead(kind: StartKind, lookm: &LookMatcher, pattern_len: Option<usize>) -> Result<StartTable<Vec<u32>>, BuildError> {
+ if let Some(len) = pattern_len { assert!(len <= PatternID::LIMIT); }
+ let stride = Start::len();
+ let starts_len = stride.checked_mul(2).unwrap();
+ let pattern_starts_len = match stride.checked_mul(pattern_len.unwrap_or(0)) { Some(x) => x, None => return Err(BuildError::too_many_start_states()) };
+ let table_len = match starts_len.checked_add(pattern_starts_len) { Some(x) => x, None => return Err(BuildError::too_many_start_states()) };
+ if let Err(_) = isize::try_from(table_len) { return Err(BuildError::too_many_start_states()); }
+ let table = vec ! [DEAD.as_u32(); table_len];
+ let start_map = StartByteMap::new(lookm);
+ Ok(StartTable { table, kind, start_map, stride, pattern_len, universal_start_unanchored: None, universal_start_anchored: None })
+ }
+ 
+}
+
+impl<a> StartTable<&[u32]> {
+ fn from_bytes_unchecked(slice: &[u8]) -> Result<(StartTable<&[u32]>, usize), DeserializeError> {
+ let slice_start = slice.as_ptr().as_usize();
+ let _ = StartKind::from_bytes(slice) ?;
+ slice = &slice [nr ..];
+ let _ = StartByteMap::from_bytes(slice) ?;
+ slice = &slice [nr ..];
+ let _ = wire::try_read_u32_as_usize(slice, "start table stride") ?;
+ slice = &slice [nr ..];
+ if stride != Start::len() { return Err(DeserializeError::generic("invalid starting table stride" )); }
+ let _ = wire::try_read_u32_as_usize(slice, "start table patterns") ?;
+ slice = &slice [nr ..];
+ let pattern_len = if maybe_pattern_len.as_u32() == u32::MAX { None } else { Some(maybe_pattern_len) };
+ if pattern_len.map_or(false, | len | len > PatternID::LIMIT) { return Err(DeserializeError::generic("invalid number of patterns" )); }
+ let _ = wire::try_read_u32(slice, "universal unanchored start") ?;
+ slice = &slice [nr ..];
+ let universal_start_unanchored = if universal_unanchored == u32::MAX { None } else { Some(StateID::try_from(universal_unanchored).map_err(| e | { DeserializeError::state_id_error(e, "universal unanchored start" ) }) ?) };
+ let _ = wire::try_read_u32(slice, "universal anchored start") ?;
+ slice = &slice [nr ..];
+ let universal_start_anchored = if universal_anchored == u32::MAX { None } else { Some(StateID::try_from(universal_anchored).map_err(| e | { DeserializeError::state_id_error(e, "universal anchored start") }) ?) };
+ let pattern_table_size = wire::mul(stride, pattern_len.unwrap_or(0), "invalid pattern length" ) ?;
+ let start_state_len = wire::add(wire::mul(2, stride, "start state stride too big") ?, pattern_table_size, "invalid 'any' pattern starts size" ) ?;
+ let table_bytes_len = wire::mul(start_state_len, StateID::SIZE, "pattern table bytes length" ) ?;
+ wire::check_slice_len(slice, table_bytes_len, "start ID table") ?;
+ wire::check_alignment::<StateID>(slice) ?;
+ let table_bytes = &slice [.. table_bytes_len];
+ slice = &slice [table_bytes_len ..];
+ let table = core::slice::from_raw_parts(table_bytes.as_ptr().cast::<u32>(), start_state_len );
+ let st = StartTable { table, kind, start_map, stride, pattern_len, universal_start_unanchored, universal_start_anchored };
+ Ok((st, slice.as_ptr().as_usize() - slice_start))
+ }
+ 
+}
+
+impl<T: AsRef<[u32]>> StartTable<T> {
+ fn write_to(&self, dst: &mut [u8]) -> Result<usize, SerializeError> {
+ let nwrite = self.write_to_len();
+ if dst.len() < nwrite { return Err(SerializeError::buffer_too_small("starting table ids" )); }
+ dst = &mut dst [.. nwrite];
+ let nw = self.kind.write_to::<E>(dst) ?;
+ dst = &mut dst [nw ..];
+ let nw = self.start_map.write_to(dst) ?;
+ dst = &mut dst [nw ..];
+ E::write_u32(u32::try_from(self.stride).unwrap(), dst);
+ dst = &mut dst [size_of::<u32>() ..];
+ E::write_u32(u32::try_from(self.pattern_len.unwrap_or(0xFFFF_FFFF)).unwrap(), dst );
+ dst = &mut dst [size_of::<u32>() ..];
+ E::write_u32(self.universal_start_unanchored.map_or(u32::MAX, | sid | sid.as_u32()), dst );
+ dst = &mut dst [size_of::<u32>() ..];
+ E::write_u32(self.universal_start_anchored.map_or(u32::MAX, | sid | sid.as_u32()), dst );
+ dst = &mut dst [size_of::<u32>() ..];
+ for &sid in self.table() { let n = wire::write_state_id::<E>(sid, &mut dst); dst = &mut dst [n ..]; }
+ Ok(nwrite)
+ }
+ 
+ fn write_to_len(&self) -> usize {
+ self.kind.write_to_len() + self.start_map.write_to_len() + size_of::<u32>() + size_of::<u32>() + size_of::<u32>() + size_of::<u32>() + (self.table().len() * StateID::SIZE)
+ }
+ 
+ fn validate(&self, dfa: &DFA<T>) -> Result<(), DeserializeError> {
+ let tt = &dfa.tt;
+ if ! self.universal_start_unanchored.map_or(true, | s | tt.is_valid(s)) { return Err(DeserializeError::generic("found invalid universal unanchored starting state ID" )); }
+ if ! self.universal_start_anchored.map_or(true, | s | tt.is_valid(s)) { return Err(DeserializeError::generic("found invalid universal anchored starting state ID" )); }
+ for &id in self.table() { if ! tt.is_valid(id) { return Err(DeserializeError::generic("found invalid starting state ID" )); } }
+ Ok(())
+ }
+ 
+ fn as_ref(&self) -> StartTable<&[u32]> {
+ StartTable { table: self.table.as_ref(), kind: self.kind, start_map: self.start_map.clone(), stride: self.stride, pattern_len: self.pattern_len, universal_start_unanchored: self.universal_start_unanchored, universal_start_anchored: self.universal_start_anchored }
+ }
+ 
+ fn to_owned(&self) -> StartTable<alloc::vec::Vec<u32>> {
+ StartTable { table: self.table.as_ref().to_vec(), kind: self.kind, start_map: self.start_map.clone(), stride: self.stride, pattern_len: self.pattern_len, universal_start_unanchored: self.universal_start_unanchored, universal_start_anchored: self.universal_start_anchored }
+ }
+ 
+ fn start(&self, anchored: Anchored, start: Start) -> Result<StateID, StartError> {
+ let start_index = start.as_usize();
+ let index = match anchored { Anchored::No => { if ! self.kind.has_unanchored() { return Err(StartError::unsupported_anchored(anchored)); } start_index } Anchored::Yes => { if ! self.kind.has_anchored() { return Err(StartError::unsupported_anchored(anchored)); } self.stride + start_index } Anchored::Pattern(pid) => { let len = match self.pattern_len { None => { return Err(StartError::unsupported_anchored(anchored)) } Some(len) => len }; if pid.as_usize() >= len { return Ok(DEAD); } (2 * self.stride) + (self.stride * pid.as_usize()) + start_index } };
+ Ok(self.table() [index])
+ }
+ 
+ fn iter(&self) -> StartStateIter<'_> {
+ StartStateIter { st: self.as_ref(), i: 0 }
+ }
+ 
+ fn table(&self) -> &[StateID] {
+ wire::u32s_to_state_ids(self.table.as_ref())
+ }
+ 
+ fn memory_usage(&self) -> usize {
+ self.table().len() * StateID::SIZE
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl<T: AsMut<[u32]>> StartTable<T> {
+ fn set_start(&mut self, anchored: Anchored, start: Start, id: StateID) {
+ let start_index = start.as_usize();
+ let index = match anchored { Anchored::No => start_index, Anchored::Yes => self.stride + start_index, Anchored::Pattern(pid) => { let pid = pid.as_usize(); let len = self.pattern_len.expect("start states for each pattern enabled"); assert!(pid<len, "invalid pattern ID {pid:?}"); self.stride.checked_mul(pid).unwrap().checked_add(self.stride.checked_mul(2).unwrap()).unwrap().checked_add(start_index).unwrap() } };
+ self.table_mut() [index] = id;
+ }
+ 
+ fn table_mut(&mut self) -> &mut [StateID] {
+ wire::u32s_to_state_ids_mut(self.table.as_mut())
+ }
+ 
+}
+
+/// An iterator over start state IDs.
+/// 
+/// This iterator yields a triple of start state ID, the anchored mode and the
+/// start state type. If a pattern ID is relevant, then the anchored mode will
+/// contain it. Start states with an anchored mode containing a pattern ID will
+/// only occur when the DFA was compiled with start states for each pattern
+/// (which is disabled by default).
+struct StartStateIter<a> {
+ st: StartTable<&[u32]>,
+ i: usize,
+}
+
+impl<a> Iterator for StartStateIter<'a> {
+ type Item = (StateID, Anchored, Start);
+ fn next(&mut self) -> Option<(StateID, Anchored, Start)> {
+ let i = self.i;
+ let table = self.st.table();
+ if i >= table.len() { return None; }
+ self.i += 1;
+ let start_type = Start::from_usize(i % self.st.stride).unwrap();
+ let anchored = if i < self.st.stride { Anchored::No } else if i < (2 * self.st.stride) { Anchored::Yes } else { let pid = (i - (2 * self.st.stride)) / self.st.stride; Anchored::Pattern(PatternID::new(pid).unwrap()) };
+ Some((table [i], anchored, start_type))
+ }
+ 
+}
+
+/// This type represents that patterns that should be reported whenever a DFA
+/// enters a match state. This structure exists to support DFAs that search for
+/// matches for multiple regexes.
+/// 
+/// This structure relies on the fact that all match states in a DFA occur
+/// contiguously in the DFA's transition table. (See dfa/special.rs for a more
+/// detailed breakdown of the representation.) Namely, when a match occurs, we
+/// know its state ID. Since we know the start and end of the contiguous region
+/// of match states, we can use that to compute the position at which the match
+/// state occurs. That in turn is used as an offset into this structure.
+#[derive(Clone, Debug)]
+struct MatchStates<T> {
+ slices: T,
+ pattern_ids: T,
+ pattern_len: usize,
+}
+
+impl<a> MatchStates<&[u32]> {
+ fn from_bytes_unchecked(slice: &[u8]) -> Result<(MatchStates<&[u32]>, usize), DeserializeError> {
+ let slice_start = slice.as_ptr().as_usize();
+ let _ = wire::try_read_u32_as_usize(slice, "match state length") ?;
+ slice = &slice [nr ..];
+ let pair_len = wire::mul(2, state_len, "match state offset pairs") ?;
+ let slices_bytes_len = wire::mul(pair_len, PatternID::SIZE, "match state slice offset byte length" ) ?;
+ wire::check_slice_len(slice, slices_bytes_len, "match state slices") ?;
+ wire::check_alignment::<PatternID>(slice) ?;
+ let slices_bytes = &slice [.. slices_bytes_len];
+ slice = &slice [slices_bytes_len ..];
+ let slices = core::slice::from_raw_parts(slices_bytes.as_ptr().cast::<u32>(), pair_len );
+ let _ = wire::try_read_u32_as_usize(slice, "pattern length") ?;
+ slice = &slice [nr ..];
+ let _ = wire::try_read_u32_as_usize(slice, "pattern ID length") ?;
+ slice = &slice [nr ..];
+ let pattern_ids_len = wire::mul(idlen, PatternID::SIZE, "pattern ID byte length") ?;
+ wire::check_slice_len(slice, pattern_ids_len, "match pattern IDs") ?;
+ wire::check_alignment::<PatternID>(slice) ?;
+ let pattern_ids_bytes = &slice [.. pattern_ids_len];
+ slice = &slice [pattern_ids_len ..];
+ let pattern_ids = core::slice::from_raw_parts(pattern_ids_bytes.as_ptr().cast::<u32>(), idlen );
+ let ms = MatchStates { slices, pattern_ids, pattern_len };
+ Ok((ms, slice.as_ptr().as_usize() - slice_start))
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl MatchStates<Vec<u32>> {
+ fn empty(pattern_len: usize) -> MatchStates<Vec<u32>> {
+ assert!(pattern_len <= PatternID::LIMIT);
+ MatchStates { slices: vec ! [], pattern_ids: vec ! [], pattern_len }
+ }
+ 
+ fn new(matches: &BTreeMap<StateID, Vec<PatternID>>, pattern_len: usize) -> Result<MatchStates<Vec<u32>>, BuildError> {
+ let mut m = MatchStates::empty(pattern_len);
+ for(_, pids) in matches.iter() { let start = PatternID::new(m.pattern_ids.len()).map_err(| _ | BuildError::too_many_match_pattern_ids()) ?; m.slices.push(start.as_u32()); m.slices.push(u32::try_from(pids.len()).unwrap()); for &pid in pids { m.pattern_ids.push(pid.as_u32()); } }
+ m.pattern_len = pattern_len;
+ Ok(m)
+ }
+ 
+ fn new_with_map(&self, matches: &BTreeMap<StateID, Vec<PatternID>>) -> Result<MatchStates<Vec<u32>>, BuildError> {
+ MatchStates::new(matches, self.pattern_len)
+ }
+ 
+}
+
+impl<T: AsRef<[u32]>> MatchStates<T> {
+ fn write_to(&self, dst: &mut [u8]) -> Result<usize, SerializeError> {
+ let nwrite = self.write_to_len();
+ if dst.len() < nwrite { return Err(SerializeError::buffer_too_small("match states")); }
+ dst = &mut dst [.. nwrite];
+ E::write_u32(u32::try_from(self.len()).unwrap(), dst);
+ dst = &mut dst [size_of::<u32>() ..];
+ for &pid in self.slices() { let n = wire::write_pattern_id::<E>(pid, &mut dst); dst = &mut dst [n ..]; }
+ E::write_u32(u32::try_from(self.pattern_len).unwrap(), dst);
+ dst = &mut dst [size_of::<u32>() ..];
+ E::write_u32(u32::try_from(self.pattern_ids().len()).unwrap(), dst);
+ dst = &mut dst [size_of::<u32>() ..];
+ for &pid in self.pattern_ids() { let n = wire::write_pattern_id::<E>(pid, &mut dst); dst = &mut dst [n ..]; }
+ Ok(nwrite)
+ }
+ 
+ fn write_to_len(&self) -> usize {
+ size_of::<u32>() + (self.slices().len() * PatternID::SIZE) + size_of::<u32>() + size_of::<u32>() + (self.pattern_ids().len() * PatternID::SIZE)
+ }
+ 
+ fn validate(&self, dfa: &DFA<T>) -> Result<(), DeserializeError> {
+ if self.len() != dfa.special.match_len(dfa.stride()) { return Err(DeserializeError::generic("match state length mismatch" )); }
+ for si in 0 .. self.len() { let start = self.slices() [si * 2] . as_usize(); let len = self.slices() [si * 2 + 1] . as_usize(); if start >= self.pattern_ids().len() { return Err(DeserializeError::generic("invalid pattern ID start offset" )); } if start + len > self.pattern_ids().len() { return Err(DeserializeError::generic("invalid pattern ID length" )); } for mi in 0 .. len { let pid = self.pattern_id(si, mi); if pid.as_usize() >= self.pattern_len { return Err(DeserializeError::generic("invalid pattern ID" )); } } }
+ Ok(())
+ }
+ 
+ fn to_map(&self, dfa: &DFA<T>) -> BTreeMap<StateID, Vec<PatternID>> {
+ let mut map = BTreeMap::new();
+ for i in 0 .. self.len() { let mut pids = vec ! []; for j in 0 .. self.pattern_len(i) { pids.push(self.pattern_id(i, j)); } map.insert(self.match_state_id(dfa, i), pids); }
+ map
+ }
+ 
+ fn as_ref(&self) -> MatchStates<&[u32]> {
+ MatchStates { slices: self.slices.as_ref(), pattern_ids: self.pattern_ids.as_ref(), pattern_len: self.pattern_len }
+ }
+ 
+ fn to_owned(&self) -> MatchStates<alloc::vec::Vec<u32>> {
+ MatchStates { slices: self.slices.as_ref().to_vec(), pattern_ids: self.pattern_ids.as_ref().to_vec(), pattern_len: self.pattern_len }
+ }
+ 
+ fn match_state_id(&self, dfa: &DFA<T>, index: usize) -> StateID {
+ assert!(dfa.special.matches(), "no match states to index");
+ let stride2 = u32::try_from(dfa.stride2()).unwrap();
+ let offset = index.checked_shl(stride2).unwrap();
+ let id = dfa.special.min_match.as_usize().checked_add(offset).unwrap();
+ let sid = StateID::new(id).unwrap();
+ assert!(dfa.is_match_state(sid));
+ sid
+ }
+ 
+ fn pattern_id(&self, state_index: usize, match_index: usize) -> PatternID {
+ self.pattern_id_slice(state_index) [match_index]
+ }
+ 
+ fn pattern_len(&self, state_index: usize) -> usize {
+ self.slices() [state_index * 2 + 1] . as_usize()
+ }
+ 
+ fn pattern_id_slice(&self, state_index: usize) -> &[PatternID] {
+ let start = self.slices() [state_index * 2] . as_usize();
+ let len = self.pattern_len(state_index);
+ &self.pattern_ids() [start .. start + len]
+ }
+ 
+ fn slices(&self) -> &[PatternID] {
+ wire::u32s_to_pattern_ids(self.slices.as_ref())
+ }
+ 
+ fn len(&self) -> usize {
+ assert_eq!(0, self.slices().len() % 2);
+ self.slices().len() / 2
+ }
+ 
+ fn pattern_ids(&self) -> &[PatternID] {
+ wire::u32s_to_pattern_ids(self.pattern_ids.as_ref())
+ }
+ 
+ fn memory_usage(&self) -> usize {
+ (self.slices().len() + self.pattern_ids().len()) * PatternID::SIZE
+ }
+ 
+}
+
+/// A common set of flags for both dense and sparse DFAs. This primarily
+/// centralizes the serialization format of these flags at a bitset.
+#[derive(Clone, Copy, Debug)]
+struct Flags {
+ has_empty: bool,
+ is_utf8: bool,
+ is_always_start_anchored: bool,
+}
+
+impl Flags {
+ fn from_nfa(nfa: &thompson::NFA) -> Flags {
+ Flags { has_empty: nfa.has_empty(), is_utf8: nfa.is_utf8(), is_always_start_anchored: nfa.is_always_start_anchored() }
+ }
+ 
+ fn from_bytes(slice: &[u8]) -> Result<(Flags, usize), DeserializeError> {
+ let _ = wire::try_read_u32(slice, "flag bitset") ?;
+ let flags = Flags { has_empty: bits & (1 << 0) != 0, is_utf8: bits & (1 << 1) != 0, is_always_start_anchored: bits & (1 << 2) != 0 };
+ Ok((flags, nread))
+ }
+ 
+ fn write_to(&self, dst: &mut [u8]) -> Result<usize, SerializeError> {
+ fn bool_to_int(b: bool) -> u32 {
+ if b { 1 } else { 0 }
+ }
+ 
+ let nwrite = self.write_to_len();
+ if dst.len() < nwrite { return Err(SerializeError::buffer_too_small("flag bitset")); }
+ let bits = (bool_to_int(self.has_empty) << 0) | (bool_to_int(self.is_utf8) << 1) | (bool_to_int(self.is_always_start_anchored) << 2);
+ E::write_u32(bits, dst);
+ Ok(nwrite)
+ }
+ 
+ fn write_to_len(&self) -> usize {
+ size_of::<u32>()
+ }
+ 
+}
+
+/// An iterator over all states in a DFA.
+/// 
+/// This iterator yields a tuple for each state. The first element of the
+/// tuple corresponds to a state's identifier, and the second element
+/// corresponds to the state itself(comprised of its transitions).
+/// 
+/// `'a` corresponding to the lifetime of original DFA, `T` corresponds to
+/// the type of the transition table itself.
+struct StateIter<a, T> {
+ tt: &TransitionTable<T>,
+ it: iter::Enumerate<slice::Chunks<'a, StateID>>,
+}
+
+impl<a, T: AsRef<[u32]>> Iterator for StateIter<'a, T> {
+ type Item = State<'a>;
+ fn next(&mut self) -> Option<State<'a>> {
+ self.it.next().map(| (index, _) | { let id = self.tt.to_state_id(index); self.tt.state(id) })
+ }
+ 
+}
+
+/// An immutable representation of a single DFA state.
+/// 
+/// `'a` corresponding to the lifetime of a DFA's transition table.
+struct State<a> {
+ id: StateID,
+ stride2: usize,
+ transitions: &[StateID],
+}
+
+impl<a> State<'a> {
+ fn transitions(&self) -> StateTransitionIter<'_> {
+ StateTransitionIter { len: self.transitions.len(), it: self.transitions.iter().enumerate() }
+ }
+ 
+ fn sparse_transitions(&self) -> StateSparseTransitionIter<'_> {
+ StateSparseTransitionIter { dense: self.transitions(), cur: None }
+ }
+ 
+ fn id(&self) -> StateID {
+ self.id
+ }
+ 
+ fn accelerate(&self, classes: &ByteClasses) -> Option<Accel> {
+ let mut accel = Accel::new();
+ for(class, id) in self.transitions() { if id == self.id() { continue; } for unit in classes.elements(class) { if let Some(byte) = unit.as_u8() { if ! accel.add(byte) { return None; } } } }
+ if accel.is_empty() { None } else { Some(accel) }
+ }
+ 
+}
+
+impl<a> fmt::Debug for State<'a> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ for(i, (start, end, sid)) in self.sparse_transitions().enumerate() { let id = if f.alternate() { sid.as_usize() } else { sid.as_usize()>> self.stride2 }; if i > 0 { write!(f, ", ") ?; } if start == end { write!(f, "{start:?} => {id:?}") ?; } else { write!(f, "{start:?}-{end:?} => {id:?}") ?; } }
+ Ok(())
+ }
+ 
+}
+
+/// An iterator over all transitions in a single DFA state. This yields
+/// a number of transitions equivalent to the alphabet length of the
+/// corresponding DFA.
+/// 
+/// Each transition is represented by a tuple. The first element is the input
+/// byte for that transition and the second element is the transition itself.
+#[derive(Debug)]
+struct StateTransitionIter<a> {
+ len: usize,
+ it: iter::Enumerate<slice::Iter<'a, StateID>>,
+}
+
+impl<a> Iterator for StateTransitionIter<'a> {
+ type Item = (alphabet::Unit, StateID);
+ fn next(&mut self) -> Option<(alphabet::Unit, StateID)> {
+ self.it.next().map(| (i, &id) | { let unit = if i + 1 == self.len { alphabet::Unit::eoi(i) } else { let b = u8::try_from(i).expect("raw byte alphabet is never exceeded"); alphabet::Unit::u8(b) }; (unit, id) })
+ }
+ 
+}
+
+/// An iterator over all non-DEAD transitions in a single DFA state using a
+/// sparse representation.
+/// 
+/// Each transition is represented by a triple. The first two elements of the
+/// triple comprise an inclusive byte range while the last element corresponds
+/// to the transition taken for all bytes in the range.
+/// 
+/// As a convenience, this always returns `alphabet::Unit` values of the same
+/// type. That is, you'll never get a(byte, EOI) or a(EOI, byte). Only(byte,
+/// byte) and(EOI, EOI) values are yielded.
+#[derive(Debug)]
+struct StateSparseTransitionIter<a> {
+ dense: StateTransitionIter<'a>,
+ cur: Option<(alphabet::Unit, alphabet::Unit, StateID)>,
+}
+
+impl<a> Iterator for StateSparseTransitionIter<'a> {
+ type Item = (alphabet::Unit, alphabet::Unit, StateID);
+ fn next(&mut self) -> Option<(alphabet::Unit, alphabet::Unit, StateID)> {
+ while let Some((unit, next)) = self.dense.next() { let(prev_start, prev_end, prev_next) = match self.cur { Some(t) => t, None => { self.cur = Some((unit, unit, next)); continue; } }; if prev_next == next && ! unit.is_eoi() { self.cur = Some((prev_start, unit, prev_next)); } else { self.cur = Some((unit, unit, next)); if prev_next != DEAD { return Some((prev_start, prev_end, prev_next)); } } }
+ if let Some((start, end, next)) = self.cur.take() { if next != DEAD { return Some((start, end, next)); } }
+ None
+ }
+ 
+}
+
+/// An error that occurred during the construction of a DFA.
+/// 
+/// This error does not provide many introspection capabilities. There are
+/// generally only two things you can do with it:
+/// 
+/// *Obtain a human readable message via its `std::fmt::Display` impl.
+/// *Access an underlying [`nfa::thompson::BuildError`](thompson::BuildError)
+/// type from its `source` method via the `std::error::Error` trait. This error
+/// only occurs when using convenience routines for building a DFA directly
+/// from a pattern string.
+/// 
+/// When the `std` feature is enabled, this implements the `std::error::Error`
+/// trait.
+#[cfg(feature = "dfa-build")]
+#[derive(Clone, Debug)]
+pub struct BuildError {
+ kind: BuildErrorKind,
+}
+
+#[cfg(feature = "dfa-build")]
+impl BuildError {
+ pub fn is_size_limit_exceeded(&self) -> bool {
+ use self::BuildErrorKind::*;
+ match self.kind { NFA(_) | Unsupported(_) => false, TooManyStates | TooManyStartStates | TooManyMatchPatternIDs | DFAExceededSizeLimit { .. } | DeterminizeExceededSizeLimit { .. } => true }
+ }
+ 
+}
+
+/// The kind of error that occurred during the construction of a DFA.
+/// 
+/// Note that this error is non-exhaustive. Adding new variants is not
+/// considered a breaking change.
+#[cfg(feature = "dfa-build")]
+#[derive(Clone, Debug)]
+enum BuildErrorKind {
+ NFA(thompson::BuildError),
+ Unsupported(&str),
+ TooManyStates,
+ TooManyStartStates,
+ TooManyMatchPatternIDs,
+ DFAExceededSizeLimit { limit: usize },
+ DeterminizeExceededSizeLimit { limit: usize },
+}
+
+#[cfg(feature = "dfa-build")]
+impl BuildError {
+ fn kind(&self) -> &BuildErrorKind {
+ &self.kind
+ }
+ 
+ fn nfa(err: thompson::BuildError) -> BuildError {
+ BuildError { kind: BuildErrorKind::NFA(err) }
+ }
+ 
+ fn unsupported_dfa_word_boundary_unicode() -> BuildError {
+ let msg = "cannot build DFAs for regexes with Unicode word \
+ boundaries; switch to ASCII word boundaries, or \
+ heuristically enable Unicode word boundaries or use a \
+ different regex engine";
+ BuildError { kind: BuildErrorKind::Unsupported(msg) }
+ }
+ 
+ fn too_many_states() -> BuildError {
+ BuildError { kind: BuildErrorKind::TooManyStates }
+ }
+ 
+ fn too_many_start_states() -> BuildError {
+ BuildError { kind: BuildErrorKind::TooManyStartStates }
+ }
+ 
+ fn too_many_match_pattern_ids() -> BuildError {
+ BuildError { kind: BuildErrorKind::TooManyMatchPatternIDs }
+ }
+ 
+ fn dfa_exceeded_size_limit(limit: usize) -> BuildError {
+ BuildError { kind: BuildErrorKind::DFAExceededSizeLimit { limit } }
+ }
+ 
+ fn determinize_exceeded_size_limit(limit: usize) -> BuildError {
+ BuildError { kind: BuildErrorKind::DeterminizeExceededSizeLimit { limit } }
+ }
+ 
+}
+
+#[cfg(all(feature = "std", feature = "dfa-build"))]
+impl std::error::Error for BuildError {
+ fn source(&self) -> Option<&(_)> {
+ match self.kind() { BuildErrorKind::NFA(ref err) => Some(err), _ => None }
+ }
+ 
+}
+
+#[cfg(feature = "dfa-build")]
+impl core::fmt::Display for BuildError {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ match self.kind() { BuildErrorKind::NFA(_) => write!(f, "error building NFA"), BuildErrorKind::Unsupported(ref msg) => { write!(f, "unsupported regex feature for DFAs: {msg}") } BuildErrorKind::TooManyStates => write!(f, "number of DFA states exceeds limit of {}", StateID::LIMIT ), BuildErrorKind::TooManyStartStates => { let stride = Start::len(); let max = usize::try_from(core::isize::MAX).unwrap(); let limit = (max - stride) / stride; write!(f, "compiling DFA with start states exceeds pattern \
+ pattern limit of {}", limit ) } BuildErrorKind::TooManyMatchPatternIDs => write!(f, "compiling DFA with total patterns in all match states \
+ exceeds limit of {}", PatternID::LIMIT ), BuildErrorKind::DFAExceededSizeLimit { limit } => write!(f, "DFA exceeded size limit of {limit:?} during determinization" ), BuildErrorKind::DeterminizeExceededSizeLimit { limit } => { write!(f, "determinization exceeded size limit of {limit:?}") } }
+ }
+ 
+}
+
+#[cfg(all(test, feature = "syntax", feature = "dfa-build"))]
+mod tests {
+ use crate::{ Input, MatchError };
+ use super::*;
+ #[test]
+ fn errors_with_unicode_word_boundary() {
+ let pattern = r"\b";
+ assert!(Builder::new().build(pattern).is_err());
+ }
+ 
+ #[test]
+ fn roundtrip_never_match() {
+ let dfa = DFA::never_match().unwrap();
+ let _ = dfa.to_bytes_native_endian();
+ let _ = DFA::from_bytes(&buf).unwrap().0;
+ assert_eq!(None, dfa.try_search_fwd(&Input::new("foo12345")).unwrap());
+ }
+ 
+ #[test]
+ fn roundtrip_always_match() {
+ use crate::HalfMatch;
+ let dfa = DFA::always_match().unwrap();
+ let _ = dfa.to_bytes_native_endian();
+ let _ = DFA::from_bytes(&buf).unwrap().0;
+ assert_eq!(Some(HalfMatch::must(0, 0)), dfa.try_search_fwd(&Input::new("foo12345")).unwrap());
+ }
+ 
+ #[test]
+ fn heuristic_unicode_reverse() {
+ let dfa = DFA::builder().configure(DFA::config().unicode_word_boundary(true)).thompson(thompson::Config::new().reverse(true)).build(r"\b[0-9]+\b").unwrap();
+ let input = Input::new("β123").range(2 ..);
+ let expected = MatchError::quit(0xB2, 1);
+ let got = dfa.try_search_rev(&input);
+ assert_eq!(Err(expected), got);
+ let input = Input::new("123β").range(.. 3);
+ let expected = MatchError::quit(0xCE, 3);
+ let got = dfa.try_search_rev(&input);
+ assert_eq!(Err(expected), got);
+ }
+ 
+ #[test]
+ fn regression_validation_order() {
+ let mut dfa = DFA::new("abc").unwrap();
+ dfa.ms = MatchStates { slices: vec ! [], pattern_ids: vec ! [], pattern_len: 1 };
+ let _ = dfa.to_bytes_native_endian();
+ DFA::from_bytes(&buf).unwrap_err();
+ }
+ 
+}
+

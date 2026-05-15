@@ -1,0 +1,921 @@
+// Auto-converted from /tmp/df-regex-syntax-0.8.10/regex-syntax-0.8.10/src/ast/mod.rs
+
+use core::cmp::Ordering;
+use alloc::{ boxed::Box, string::String, vec, vec::Vec };
+pub use crate::ast::visitor::{ visit, Visitor };
+pub mod parse;
+pub mod print;
+mod visitor;
+/// An error that occurred while parsing a regular expression into an abstract
+/// syntax tree.
+/// 
+/// Note that not all ASTs represents a valid regular expression. For example,
+/// an AST is constructed without error for `\p{Quux}`, but `Quux` is not a
+/// valid Unicode property name. That particular error is reported when
+/// translating an AST to the high-level intermediate representation(`HIR`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Error {
+ kind: ErrorKind,
+ pattern: String,
+ span: Span,
+}
+
+impl Error {
+ pub fn kind(&self) -> &ErrorKind {
+ &self.kind
+ }
+ 
+ pub fn pattern(&self) -> &str {
+ &self.pattern
+ }
+ 
+ pub fn span(&self) -> &Span {
+ &self.span
+ }
+ 
+ pub fn auxiliary_span(&self) -> Option<&Span> {
+ use self::ErrorKind::*;
+ match self.kind { FlagDuplicate { ref original } => Some(original), FlagRepeatedNegation { ref original, .. } => Some(original), GroupNameDuplicate { ref original, .. } => Some(original), _ => None }
+ }
+ 
+}
+
+/// The type of an error that occurred while building an AST.
+/// 
+/// This error type is marked as `non_exhaustive`. This means that adding a
+/// new variant is not considered a breaking change.
+#[non_exhaustive]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum ErrorKind {
+ CaptureLimitExceeded,
+ ClassEscapeInvalid,
+ ClassRangeInvalid,
+ ClassRangeLiteral,
+ ClassUnclosed,
+ DecimalEmpty,
+ DecimalInvalid,
+ EscapeHexEmpty,
+ EscapeHexInvalid,
+ EscapeHexInvalidDigit,
+ EscapeUnexpectedEof,
+ EscapeUnrecognized,
+ FlagDanglingNegation,
+ FlagDuplicate { original: Span },
+ FlagRepeatedNegation { original: Span },
+ FlagUnexpectedEof,
+ FlagUnrecognized,
+ GroupNameDuplicate { original: Span },
+ GroupNameEmpty,
+ GroupNameInvalid,
+ GroupNameUnexpectedEof,
+ GroupUnclosed,
+ GroupUnopened,
+ NestLimitExceeded(u32),
+ RepetitionCountInvalid,
+ RepetitionCountDecimalEmpty,
+ RepetitionCountUnclosed,
+ RepetitionMissing,
+ SpecialWordBoundaryUnclosed,
+ SpecialWordBoundaryUnrecognized,
+ SpecialWordOrRepetitionUnexpectedEof,
+ UnicodeClassInvalid,
+ UnsupportedBackreference,
+ UnsupportedLookAround,
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for Error {
+}
+
+impl core::fmt::Display for Error {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ crate::error::Formatter::from(self).fmt(f)
+ }
+ 
+}
+
+impl core::fmt::Display for ErrorKind {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ use self::ErrorKind::*;
+ match * self { CaptureLimitExceeded => write!(f, "exceeded the maximum number of \
+ capturing groups({})", u32::MAX), ClassEscapeInvalid => { write!(f, "invalid escape sequence found in character class") } ClassRangeInvalid => write!(f, "invalid character class range, \
+ the start must be <= the end"), ClassRangeLiteral => { write!(f, "invalid range boundary, must be a literal") } ClassUnclosed => write!(f, "unclosed character class"), DecimalEmpty => write!(f, "decimal literal empty"), DecimalInvalid => write!(f, "decimal literal invalid"), EscapeHexEmpty => write!(f, "hexadecimal literal empty"), EscapeHexInvalid => { write!(f, "hexadecimal literal is not a Unicode scalar value") } EscapeHexInvalidDigit => write!(f, "invalid hexadecimal digit"), EscapeUnexpectedEof => write!(f, "incomplete escape sequence, \
+ reached end of pattern prematurely"), EscapeUnrecognized => write!(f, "unrecognized escape sequence"), FlagDanglingNegation => { write!(f, "dangling flag negation operator") } FlagDuplicate { .. } => write!(f, "duplicate flag"), FlagRepeatedNegation { .. } => { write!(f, "flag negation operator repeated") } FlagUnexpectedEof => { write!(f, "expected flag but got end of regex") } FlagUnrecognized => write!(f, "unrecognized flag"), GroupNameDuplicate { .. } => { write!(f, "duplicate capture group name") } GroupNameEmpty => write!(f, "empty capture group name"), GroupNameInvalid => write!(f, "invalid capture group character"), GroupNameUnexpectedEof => write!(f, "unclosed capture group name"), GroupUnclosed => write!(f, "unclosed group"), GroupUnopened => write!(f, "unopened group"), NestLimitExceeded(limit) => write!(f, "exceed the maximum number of \
+ nested parentheses/brackets({})", limit), RepetitionCountInvalid => write!(f, "invalid repetition count range, \
+ the start must be <= the end"), RepetitionCountDecimalEmpty => { write!(f, "repetition quantifier expects a valid decimal") } RepetitionCountUnclosed => { write!(f, "unclosed counted repetition") } RepetitionMissing => { write!(f, "repetition operator missing expression") } SpecialWordBoundaryUnclosed => { write!(f, "special word boundary assertion is either \
+ unclosed or contains an invalid character" ) } SpecialWordBoundaryUnrecognized => { write!(f, "unrecognized special word boundary assertion, \
+ valid choices are: start, end, start-half \
+ or end-half" ) } SpecialWordOrRepetitionUnexpectedEof => { write!(f, "found either the beginning of a special word \
+ boundary or a bounded repetition on a \\b with \
+ an opening brace, but no closing brace" ) } UnicodeClassInvalid => { write!(f, "invalid Unicode character class") } UnsupportedBackreference => { write!(f, "backreferences are not supported") } UnsupportedLookAround => write!(f, "look-around, including look-ahead and look-behind, \
+ is not supported") }
+ }
+ 
+}
+
+/// Span represents the position information of a single AST item.
+/// 
+/// All span positions are absolute byte offsets that can be used on the
+/// original regular expression that was parsed.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Span {
+ pub start: Position,
+ pub end: Position,
+}
+
+impl core::fmt::Debug for Span {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ write!(f, "Span({:?}, {:?})", self.start, self.end)
+ }
+ 
+}
+
+impl Ord for Span {
+ fn cmp(&self, other: &Span) -> Ordering {
+ (&self.start, &self.end).cmp(& (&other.start, &other.end))
+ }
+ 
+}
+
+impl PartialOrd for Span {
+ fn partial_cmp(&self, other: &Span) -> Option<Ordering> {
+ Some(self.cmp(other))
+ }
+ 
+}
+
+/// A single position in a regular expression.
+/// 
+/// A position encodes one half of a span, and include the byte offset, line
+/// number and column number.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Position {
+ pub offset: usize,
+ pub line: usize,
+ pub column: usize,
+}
+
+impl core::fmt::Debug for Position {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ write!(f, "Position(o: {:?}, l: {:?}, c: {:?})", self.offset, self.line, self.column)
+ }
+ 
+}
+
+impl Ord for Position {
+ fn cmp(&self, other: &Position) -> Ordering {
+ self.offset.cmp(&other.offset)
+ }
+ 
+}
+
+impl PartialOrd for Position {
+ fn partial_cmp(&self, other: &Position) -> Option<Ordering> {
+ Some(self.cmp(other))
+ }
+ 
+}
+
+impl Span {
+ pub fn new(start: Position, end: Position) -> Span {
+ Span { start, end }
+ }
+ 
+ pub fn splat(pos: Position) -> Span {
+ Span::new(pos, pos)
+ }
+ 
+ pub fn with_start(self, pos: Position) -> Span {
+ Span { start: pos, .. self }
+ }
+ 
+ pub fn with_end(self, pos: Position) -> Span {
+ Span { end: pos, .. self }
+ }
+ 
+ pub fn is_one_line(&self) -> bool {
+ self.start.line == self.end.line
+ }
+ 
+ pub fn is_empty(&self) -> bool {
+ self.start.offset == self.end.offset
+ }
+ 
+}
+
+impl Position {
+ pub fn new(offset: usize, line: usize, column: usize) -> Position {
+ Position { offset, line, column }
+ }
+ 
+}
+
+/// An abstract syntax tree for a singular expression along with comments
+/// found.
+/// 
+/// Comments are not stored in the tree itself to avoid complexity. Each
+/// comment contains a span of precisely where it occurred in the original
+/// regular expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct WithComments {
+ pub ast: Ast,
+ pub comments: Vec<Comment>,
+}
+
+/// A comment from a regular expression with an associated span.
+/// 
+/// A regular expression can only contain comments when the `x` flag is
+/// enabled.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Comment {
+ pub span: Span,
+ pub comment: String,
+}
+
+/// An abstract syntax tree for a single regular expression.
+/// 
+/// An `Ast`'s `fmt::Display` implementation uses constant stack space and heap
+/// space proportional to the size of the `Ast`.
+/// 
+/// This type defines its own destructor that uses constant stack space and
+/// heap space proportional to the size of the `Ast`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum Ast {
+ Empty(Box<Span>),
+ Flags(Box<SetFlags>),
+ Literal(Box<Literal>),
+ Dot(Box<Span>),
+ Assertion(Box<Assertion>),
+ ClassUnicode(Box<ClassUnicode>),
+ ClassPerl(Box<ClassPerl>),
+ ClassBracketed(Box<ClassBracketed>),
+ Repetition(Box<Repetition>),
+ Group(Box<Group>),
+ Alternation(Box<Alternation>),
+ Concat(Box<Concat>),
+}
+
+impl Ast {
+ pub fn empty(span: Span) -> Ast {
+ Ast::Empty(Box::new(span))
+ }
+ 
+ pub fn flags(e: SetFlags) -> Ast {
+ Ast::Flags(Box::new(e))
+ }
+ 
+ pub fn literal(e: Literal) -> Ast {
+ Ast::Literal(Box::new(e))
+ }
+ 
+ pub fn dot(span: Span) -> Ast {
+ Ast::Dot(Box::new(span))
+ }
+ 
+ pub fn assertion(e: Assertion) -> Ast {
+ Ast::Assertion(Box::new(e))
+ }
+ 
+ pub fn class_unicode(e: ClassUnicode) -> Ast {
+ Ast::ClassUnicode(Box::new(e))
+ }
+ 
+ pub fn class_perl(e: ClassPerl) -> Ast {
+ Ast::ClassPerl(Box::new(e))
+ }
+ 
+ pub fn class_bracketed(e: ClassBracketed) -> Ast {
+ Ast::ClassBracketed(Box::new(e))
+ }
+ 
+ pub fn repetition(e: Repetition) -> Ast {
+ Ast::Repetition(Box::new(e))
+ }
+ 
+ pub fn group(e: Group) -> Ast {
+ Ast::Group(Box::new(e))
+ }
+ 
+ pub fn alternation(e: Alternation) -> Ast {
+ Ast::Alternation(Box::new(e))
+ }
+ 
+ pub fn concat(e: Concat) -> Ast {
+ Ast::Concat(Box::new(e))
+ }
+ 
+ pub fn span(&self) -> &Span {
+ match * self { Ast::Empty(ref span) => span, Ast::Flags(ref x) => &x.span, Ast::Literal(ref x) => &x.span, Ast::Dot(ref span) => span, Ast::Assertion(ref x) => &x.span, Ast::ClassUnicode(ref x) => &x.span, Ast::ClassPerl(ref x) => &x.span, Ast::ClassBracketed(ref x) => &x.span, Ast::Repetition(ref x) => &x.span, Ast::Group(ref x) => &x.span, Ast::Alternation(ref x) => &x.span, Ast::Concat(ref x) => &x.span }
+ }
+ 
+ pub fn is_empty(&self) -> bool {
+ match * self { Ast::Empty(_) => true, _ => false }
+ }
+ 
+ fn has_subexprs(&self) -> bool {
+ match * self { Ast::Empty(_) | Ast::Flags(_) | Ast::Literal(_) | Ast::Dot(_) | Ast::Assertion(_) | Ast::ClassUnicode(_) | Ast::ClassPerl(_) => false, Ast::ClassBracketed(_) | Ast::Repetition(_) | Ast::Group(_) | Ast::Alternation(_) | Ast::Concat(_) => true }
+ }
+ 
+}
+
+/// Print a display representation of this Ast.
+/// 
+/// This does not preserve any of the original whitespace formatting that may
+/// have originally been present in the concrete syntax from which this Ast
+/// was generated.
+/// 
+/// This implementation uses constant stack space and heap space proportional
+/// to the size of the `Ast`.
+impl core::fmt::Display for Ast {
+ fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ use crate::ast::print::Printer;
+ Printer::new().print(self, f)
+ }
+ 
+}
+
+/// An alternation of regular expressions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Alternation {
+ pub span: Span,
+ pub asts: Vec<Ast>,
+}
+
+impl Alternation {
+ pub fn into_ast(self) -> Ast {
+ match self.asts.len() { 0 => Ast::empty(self.span), 1 => self.asts.pop().unwrap(), _ => Ast::alternation(self) }
+ }
+ 
+}
+
+/// A concatenation of regular expressions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Concat {
+ pub span: Span,
+ pub asts: Vec<Ast>,
+}
+
+impl Concat {
+ pub fn into_ast(self) -> Ast {
+ match self.asts.len() { 0 => Ast::empty(self.span), 1 => self.asts.pop().unwrap(), _ => Ast::concat(self) }
+ }
+ 
+}
+
+/// A single literal expression.
+/// 
+/// A literal corresponds to a single Unicode scalar value. Literals may be
+/// represented in their literal form, e.g., `a` or in their escaped form,
+/// e.g., `\x61`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Literal {
+ pub span: Span,
+ pub kind: LiteralKind,
+ pub c: char,
+}
+
+impl Literal {
+ pub fn byte(&self) -> Option<u8> {
+ match self.kind { LiteralKind::HexFixed(HexLiteralKind::X) => { u8::try_from(self.c).ok() } _ => None }
+ }
+ 
+}
+
+/// The kind of a single literal expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum LiteralKind {
+ Verbatim,
+ Meta,
+ Superfluous,
+ Octal,
+ HexFixed(HexLiteralKind),
+ HexBrace(HexLiteralKind),
+ Special(SpecialLiteralKind),
+}
+
+/// The type of a special literal.
+/// 
+/// A special literal is a special escape sequence recognized by the regex
+/// parser, e.g., `\f` or `\n`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum SpecialLiteralKind {
+ Bell,
+ FormFeed,
+ Tab,
+ LineFeed,
+ CarriageReturn,
+ VerticalTab,
+ Space,
+}
+
+/// The type of a Unicode hex literal.
+/// 
+/// Note that all variants behave the same when used with brackets. They only
+/// differ when used without brackets in the number of hex digits that must
+/// follow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum HexLiteralKind {
+ X,
+ UnicodeShort,
+ UnicodeLong,
+}
+
+impl HexLiteralKind {
+ pub fn digits(&self) -> u32 {
+ match * self { HexLiteralKind::X => 2, HexLiteralKind::UnicodeShort => 4, HexLiteralKind::UnicodeLong => 8 }
+ }
+ 
+}
+
+/// A Perl character class.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct ClassPerl {
+ pub span: Span,
+ pub kind: ClassPerlKind,
+ pub negated: bool,
+}
+
+/// The available Perl character classes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum ClassPerlKind {
+ Digit,
+ Space,
+ Word,
+}
+
+/// An ASCII character class.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct ClassAscii {
+ pub span: Span,
+ pub kind: ClassAsciiKind,
+ pub negated: bool,
+}
+
+/// The available ASCII character classes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum ClassAsciiKind {
+ Alnum,
+ Alpha,
+ Ascii,
+ Blank,
+ Cntrl,
+ Digit,
+ Graph,
+ Lower,
+ Print,
+ Punct,
+ Space,
+ Upper,
+ Word,
+ Xdigit,
+}
+
+impl ClassAsciiKind {
+ pub fn from_name(name: &str) -> Option<ClassAsciiKind> {
+ use self::ClassAsciiKind::*;
+ match name { "alnum" => Some(Alnum), "alpha" => Some(Alpha), "ascii" => Some(Ascii), "blank" => Some(Blank), "cntrl" => Some(Cntrl), "digit" => Some(Digit), "graph" => Some(Graph), "lower" => Some(Lower), "print" => Some(Print), "punct" => Some(Punct), "space" => Some(Space), "upper" => Some(Upper), "word" => Some(Word), "xdigit" => Some(Xdigit), _ => None }
+ }
+ 
+}
+
+/// A Unicode character class.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct ClassUnicode {
+ pub span: Span,
+ pub negated: bool,
+ pub kind: ClassUnicodeKind,
+}
+
+impl ClassUnicode {
+ pub fn is_negated(&self) -> bool {
+ match self.kind { ClassUnicodeKind::NamedValue { op: ClassUnicodeOpKind::NotEqual, .. } => ! self.negated, _ => self.negated }
+ }
+ 
+}
+
+/// The available forms of Unicode character classes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClassUnicodeKind {
+ OneLetter(char),
+ Named(String),
+ NamedValue { op: ClassUnicodeOpKind, name: String, value: String },
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<_> for ClassUnicodeKind {
+ fn arbitrary(u: &mut arbitrary::Unstructured) -> arbitrary::Result<ClassUnicodeKind> {
+ #[cfg(any(feature = "unicode-age", feature = "unicode-bool", feature = "unicode-gencat", feature = "unicode-perl", feature = "unicode-script", feature = "unicode-segment" ))] { use alloc::string::ToString; use super::unicode_tables::{ property_names::PROPERTY_NAMES, property_values::PROPERTY_VALUES }; match u.choose_index(3) ? { 0 => { let all = PROPERTY_VALUES.iter().flat_map(| e | e.1.iter()).filter(| (name, _) | name.len() == 1).count(); let idx = u.choose_index(all) ?; let value = PROPERTY_VALUES.iter().flat_map(| e | e.1.iter()).take(idx + 1).last().unwrap().0.chars().next().unwrap(); Ok(ClassUnicodeKind::OneLetter(value)) } 1 => { let all = PROPERTY_VALUES.iter().map(| e | e.1.len()).sum::<usize>() + PROPERTY_NAMES.len(); let idx = u.choose_index(all) ?; let name = PROPERTY_VALUES.iter().flat_map(| e | e.1.iter()).chain(PROPERTY_NAMES).map(| (_, e) | e).take(idx + 1).last().unwrap(); Ok(ClassUnicodeKind::Named(name.to_string())) } 2 => { let all = PROPERTY_VALUES.iter().map(| e | e.1.len()).sum::<usize>(); let idx = u.choose_index(all) ?; let(prop, value) = PROPERTY_VALUES.iter().flat_map(| e | { e.1.iter().map(| (_, value) | (e.0, value)) }).take(idx + 1).last().unwrap(); Ok(ClassUnicodeKind::NamedValue { op: u.arbitrary() ?, name: prop.to_string(), value: value.to_string() }) } _ => unreachable!("index chosen is impossible") } }
+ #[cfg(not(any(feature = "unicode-age", feature = "unicode-bool", feature = "unicode-gencat", feature = "unicode-perl", feature = "unicode-script", feature = "unicode-segment" )))] { match u.choose_index(3) ? { 0 => Ok(ClassUnicodeKind::OneLetter(u.arbitrary() ?)), 1 => Ok(ClassUnicodeKind::Named(u.arbitrary() ?)), 2 => Ok(ClassUnicodeKind::NamedValue { op: u.arbitrary() ?, name: u.arbitrary() ?, value: u.arbitrary() ? }), _ => unreachable!("index chosen is impossible") } }
+ }
+ 
+ fn size_hint(depth: usize) ->(usize, Option<usize>) {
+ #[cfg(any(feature = "unicode-age", feature = "unicode-bool", feature = "unicode-gencat", feature = "unicode-perl", feature = "unicode-script", feature = "unicode-segment" ))] { arbitrary::size_hint::and_all(& [usize::size_hint(depth), usize::size_hint(depth), arbitrary::size_hint::or((0, Some(0)), ClassUnicodeOpKind::size_hint(depth) ) ,]) }
+ #[cfg(not(any(feature = "unicode-age", feature = "unicode-bool", feature = "unicode-gencat", feature = "unicode-perl", feature = "unicode-script", feature = "unicode-segment" )))] { arbitrary::size_hint::and(usize::size_hint(depth), arbitrary::size_hint::or_all(& [char::size_hint(depth), String::size_hint(depth), arbitrary::size_hint::and_all(& [String::size_hint(depth), String::size_hint(depth), ClassUnicodeOpKind::size_hint(depth) ,]) ,]) ) }
+ }
+ 
+}
+
+/// The type of op used in a Unicode character class.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum ClassUnicodeOpKind {
+ Equal,
+ Colon,
+ NotEqual,
+}
+
+impl ClassUnicodeOpKind {
+ pub fn is_equal(&self) -> bool {
+ match * self { ClassUnicodeOpKind::Equal | ClassUnicodeOpKind::Colon => true, _ => false }
+ }
+ 
+}
+
+/// A bracketed character class, e.g., `[a-z0-9]`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct ClassBracketed {
+ pub span: Span,
+ pub negated: bool,
+ pub kind: ClassSet,
+}
+
+/// A character class set.
+/// 
+/// This type corresponds to the internal structure of a bracketed character
+/// class. That is, every bracketed character is one of two types: a union of
+/// items(literals, ranges, other bracketed classes) or a tree of binary set
+/// operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum ClassSet {
+ Item(ClassSetItem),
+ BinaryOp(ClassSetBinaryOp),
+}
+
+impl ClassSet {
+ pub fn union(ast: ClassSetUnion) -> ClassSet {
+ ClassSet::Item(ClassSetItem::Union(ast))
+ }
+ 
+ pub fn span(&self) -> &Span {
+ match * self { ClassSet::Item(ref x) => x.span(), ClassSet::BinaryOp(ref x) => &x.span }
+ }
+ 
+ fn is_empty(&self) -> bool {
+ match * self { ClassSet::Item(ClassSetItem::Empty(_)) => true, _ => false }
+ }
+ 
+}
+
+/// A single component of a character class set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum ClassSetItem {
+ Empty(Span),
+ Literal(Literal),
+ Range(ClassSetRange),
+ Ascii(ClassAscii),
+ Unicode(ClassUnicode),
+ Perl(ClassPerl),
+ Bracketed(Box<ClassBracketed>),
+ Union(ClassSetUnion),
+}
+
+impl ClassSetItem {
+ pub fn span(&self) -> &Span {
+ match * self { ClassSetItem::Empty(ref span) => span, ClassSetItem::Literal(ref x) => &x.span, ClassSetItem::Range(ref x) => &x.span, ClassSetItem::Ascii(ref x) => &x.span, ClassSetItem::Perl(ref x) => &x.span, ClassSetItem::Unicode(ref x) => &x.span, ClassSetItem::Bracketed(ref x) => &x.span, ClassSetItem::Union(ref x) => &x.span }
+ }
+ 
+}
+
+/// A single character class range in a set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct ClassSetRange {
+ pub span: Span,
+ pub start: Literal,
+ pub end: Literal,
+}
+
+impl ClassSetRange {
+ pub fn is_valid(&self) -> bool {
+ self.start.c <= self.end.c
+ }
+ 
+}
+
+/// A union of items inside a character class set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct ClassSetUnion {
+ pub span: Span,
+ pub items: Vec<ClassSetItem>,
+}
+
+impl ClassSetUnion {
+ pub fn push(&mut self, item: ClassSetItem) {
+ if self.items.is_empty() { self.span.start = item.span().start; }
+ self.span.end = item.span().end;
+ self.items.push(item);
+ }
+ 
+ pub fn into_item(self) -> ClassSetItem {
+ match self.items.len() { 0 => ClassSetItem::Empty(self.span), 1 => self.items.pop().unwrap(), _ => ClassSetItem::Union(self) }
+ }
+ 
+}
+
+/// A Unicode character class set operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct ClassSetBinaryOp {
+ pub span: Span,
+ pub kind: ClassSetBinaryOpKind,
+ pub lhs: Box<ClassSet>,
+ pub rhs: Box<ClassSet>,
+}
+
+/// The type of a Unicode character class set operation.
+/// 
+/// Note that this doesn't explicitly represent union since there is no
+/// explicit union operator. Concatenation inside a character class corresponds
+/// to the union operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum ClassSetBinaryOpKind {
+ Intersection,
+ Difference,
+ SymmetricDifference,
+}
+
+/// A single zero-width assertion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Assertion {
+ pub span: Span,
+ pub kind: AssertionKind,
+}
+
+/// An assertion kind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum AssertionKind {
+ StartLine,
+ EndLine,
+ StartText,
+ EndText,
+ WordBoundary,
+ NotWordBoundary,
+ WordBoundaryStart,
+ WordBoundaryEnd,
+ WordBoundaryStartAngle,
+ WordBoundaryEndAngle,
+ WordBoundaryStartHalf,
+ WordBoundaryEndHalf,
+}
+
+/// A repetition operation applied to a regular expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Repetition {
+ pub span: Span,
+ pub op: RepetitionOp,
+ pub greedy: bool,
+ pub ast: Box<Ast>,
+}
+
+/// The repetition operator itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct RepetitionOp {
+ pub span: Span,
+ pub kind: RepetitionKind,
+}
+
+/// The kind of a repetition operator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum RepetitionKind {
+ ZeroOrOne,
+ ZeroOrMore,
+ OneOrMore,
+ Range(RepetitionRange),
+}
+
+/// A range repetition operator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum RepetitionRange {
+ Exactly(u32),
+ AtLeast(u32),
+ Bounded(u32, u32),
+}
+
+impl RepetitionRange {
+ pub fn is_valid(&self) -> bool {
+ match * self { RepetitionRange::Bounded(s, e) if s > e => false, _ => true }
+ }
+ 
+}
+
+/// A grouped regular expression.
+/// 
+/// This includes both capturing and non-capturing groups. This does **not**
+/// include flag-only groups like `(?is)`, but does contain any group that
+/// contains a sub-expression, e.g., `(a)`, `(?P<name>a)`, `(?:a)` and
+/// `(?is:a)`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Group {
+ pub span: Span,
+ pub kind: GroupKind,
+ pub ast: Box<Ast>,
+}
+
+impl Group {
+ pub fn flags(&self) -> Option<&Flags> {
+ match self.kind { GroupKind::NonCapturing(ref flags) => Some(flags), _ => None }
+ }
+ 
+ pub fn is_capturing(&self) -> bool {
+ match self.kind { GroupKind::CaptureIndex(_) | GroupKind::CaptureName { .. } => true, GroupKind::NonCapturing(_) => false }
+ }
+ 
+ pub fn capture_index(&self) -> Option<u32> {
+ match self.kind { GroupKind::CaptureIndex(i) => Some(i), GroupKind::CaptureName { ref name, .. } => Some(name.index), GroupKind::NonCapturing(_) => None }
+ }
+ 
+}
+
+/// The kind of a group.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum GroupKind {
+ CaptureIndex(u32),
+ CaptureName { starts_with_p: bool, name: CaptureName },
+ NonCapturing(Flags),
+}
+
+/// A capture name.
+/// 
+/// This corresponds to the name itself between the angle brackets in, e.g.,
+/// `(?P<foo>expr)`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaptureName {
+ pub span: Span,
+ pub name: String,
+ pub index: u32,
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<_> for CaptureName {
+ fn arbitrary(u: &mut arbitrary::Unstructured) -> arbitrary::Result<CaptureName> {
+ let len = u.arbitrary_len::<char>() ?;
+ if len == 0 { return Err(arbitrary::Error::NotEnoughData); }
+ let _ = String::new();
+ for _ in 0 .. len { let ch: char = u.arbitrary() ?; let cp = u32::from(ch); let ascii_letter_offset = u8::try_from(cp % 26).unwrap(); let ascii_letter = b'a' + ascii_letter_offset; name.push(char::from(ascii_letter)); }
+ Ok(CaptureName { span: u.arbitrary() ?, name, index: u.arbitrary() ? })
+ }
+ 
+ fn size_hint(depth: usize) ->(usize, Option<usize>) {
+ arbitrary::size_hint::and_all(& [Span::size_hint(depth), usize::size_hint(depth), u32::size_hint(depth) ,])
+ }
+ 
+}
+
+/// A group of flags that is not applied to a particular regular expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct SetFlags {
+ pub span: Span,
+ pub flags: Flags,
+}
+
+/// A group of flags.
+/// 
+/// This corresponds only to the sequence of flags themselves, e.g., `is-u`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct Flags {
+ pub span: Span,
+ pub items: Vec<FlagsItem>,
+}
+
+impl Flags {
+ pub fn add_item(&mut self, item: FlagsItem) -> Option<usize> {
+ for(i, x) in self.items.iter().enumerate() { if x.kind == item.kind { return Some(i); } }
+ self.items.push(item);
+ None
+ }
+ 
+ pub fn flag_state(&self, flag: Flag) -> Option<bool> {
+ let mut negated = false;
+ for x in &self.items { match x.kind { FlagsItemKind::Negation => { negated = true; } FlagsItemKind::Flag(ref xflag) if xflag == &flag => { return Some(! negated); } _ => { } } }
+ None
+ }
+ 
+}
+
+/// A single item in a group of flags.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct FlagsItem {
+ pub span: Span,
+ pub kind: FlagsItemKind,
+}
+
+/// The kind of an item in a group of flags.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum FlagsItemKind {
+ Negation,
+ Flag(Flag),
+}
+
+impl FlagsItemKind {
+ pub fn is_negation(&self) -> bool {
+ match * self { FlagsItemKind::Negation => true, _ => false }
+ }
+ 
+}
+
+/// A single flag.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum Flag {
+ CaseInsensitive,
+ MultiLine,
+ DotMatchesNewLine,
+ SwapGreed,
+ Unicode,
+ CRLF,
+ IgnoreWhitespace,
+}
+
+/// A custom `Drop` impl is used for `Ast` such that it uses constant stack
+/// space but heap space proportional to the depth of the `Ast`.
+impl Drop for Ast {
+ fn drop(&mut self) {
+ use core::mem;
+ match * self { Ast::Empty(_) | Ast::Flags(_) | Ast::Literal(_) | Ast::Dot(_) | Ast::Assertion(_) | Ast::ClassUnicode(_) | Ast::ClassPerl(_) | Ast::ClassBracketed(_) => return, Ast::Repetition(ref x) if ! x.ast.has_subexprs() => return, Ast::Group(ref x) if ! x.ast.has_subexprs() => return, Ast::Alternation(ref x) if x.asts.is_empty() => return, Ast::Concat(ref x) if x.asts.is_empty() => return, _ => { } }
+ let empty_span = | | Span::splat(Position::new(0, 0, 0));
+ let empty_ast = | | Ast::empty(empty_span());
+ let mut stack = vec ! [mem::replace(self, empty_ast())];
+ while let Some(mut ast) = stack.pop() { match ast { Ast::Empty(_) | Ast::Flags(_) | Ast::Literal(_) | Ast::Dot(_) | Ast::Assertion(_) | Ast::ClassUnicode(_) | Ast::ClassPerl(_) | Ast::ClassBracketed(_) => { } Ast::Repetition(ref mut x) => { stack.push(mem::replace(&mut x.ast, empty_ast())); } Ast::Group(ref mut x) => { stack.push(mem::replace(&mut x.ast, empty_ast())); } Ast::Alternation(ref mut x) => { stack.extend(x.asts.drain(..)); } Ast::Concat(ref mut x) => { stack.extend(x.asts.drain(..)); } } }
+ }
+ 
+}
+
+/// A custom `Drop` impl is used for `ClassSet` such that it uses constant
+/// stack space but heap space proportional to the depth of the `ClassSet`.
+impl Drop for ClassSet {
+ fn drop(&mut self) {
+ use core::mem;
+ match * self { ClassSet::Item(ref item) => match * item { ClassSetItem::Empty(_) | ClassSetItem::Literal(_) | ClassSetItem::Range(_) | ClassSetItem::Ascii(_) | ClassSetItem::Unicode(_) | ClassSetItem::Perl(_) => return, ClassSetItem::Bracketed(ref x) => { if x.kind.is_empty() { return; } } ClassSetItem::Union(ref x) => { if x.items.is_empty() { return; } } }, ClassSet::BinaryOp(ref op) => { if op.lhs.is_empty() &&op.rhs.is_empty() { return; } } }
+ let empty_span = | | Span::splat(Position::new(0, 0, 0));
+ let empty_set = | | ClassSet::Item(ClassSetItem::Empty(empty_span()));
+ let mut stack = vec ! [mem::replace(self, empty_set())];
+ while let Some(mut set) = stack.pop() { match set { ClassSet::Item(ref mut item) => match * item { ClassSetItem::Empty(_) | ClassSetItem::Literal(_) | ClassSetItem::Range(_) | ClassSetItem::Ascii(_) | ClassSetItem::Unicode(_) | ClassSetItem::Perl(_) => { } ClassSetItem::Bracketed(ref mut x) => { stack.push(mem::replace(&mut x.kind, empty_set())); } ClassSetItem::Union(ref mut x) => { stack.extend(x.items.drain(..).map(ClassSet::Item)); } }, ClassSet::BinaryOp(ref mut op) => { stack.push(mem::replace(&mut op.lhs, empty_set())); stack.push(mem::replace(&mut op.rhs, empty_set())); } } }
+ }
+ 
+}
+
+#[cfg(test)]
+mod tests {
+ use super::*;
+ #[test]
+ #[cfg(any(unix, windows))]
+ fn no_stack_overflow_on_drop() {
+ use std::thread;
+ let run = | | { let span = | | Span::splat(Position::new(0, 0, 0)); let mut ast = Ast::empty(span()); for i in 0 .. 200 { ast = Ast::group(Group { span: span(), kind: GroupKind::CaptureIndex(i), ast: Box::new(ast) }); } assert!(! ast.is_empty()); };
+ thread::Builder::new().stack_size(16 << 10).spawn(run).unwrap().join().unwrap();
+ }
+ 
+ #[test]
+ fn ast_size() {
+ let max = 2 * core::mem::size_of::<usize>();
+ let size = core::mem::size_of::<Ast>();
+ assert!(size <= max, "Ast size of {size} bytes is bigger than suggested max {max}" );
+ }
+ 
+}
+
